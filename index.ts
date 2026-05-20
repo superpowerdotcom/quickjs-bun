@@ -1,3 +1,6 @@
+// oxlint-disable-next-line typescript/triple-slash-reference
+/// <reference path="./src/ambient.d.ts" />
+
 export { JSAtom } from "./src/atom";
 export { JSContext } from "./src/context";
 export { Deferred } from "./src/deferred";
