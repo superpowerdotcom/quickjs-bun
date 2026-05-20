@@ -1,0 +1,13 @@
+{
+  "name": "@quickjs-bun/example-codemode-chat",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "bun index.ts"
+  },
+  "dependencies": {
+    "@aws-sdk/client-bedrock-runtime": "^3.1049.0",
+    "zod": "^4.4.3"
+  }
+}

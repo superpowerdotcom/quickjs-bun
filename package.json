@@ -1,0 +1,76 @@
+{
+  "name": "quickjs-bun",
+  "version": "0.1.0",
+  "description": "Lightweight, fully-featured, idiomatic bun:ffi bindings to QuickJS.",
+  "keywords": [
+    "bun",
+    "bun-ffi",
+    "embedded",
+    "ffi",
+    "javascript",
+    "quickjs",
+    "sandbox",
+    "vm"
+  ],
+  "homepage": "https://github.com/superpowerdotcom/quickjs-bun#readme",
+  "bugs": {
+    "url": "https://github.com/superpowerdotcom/quickjs-bun/issues"
+  },
+  "license": "MIT",
+  "author": {
+    "name": "Kenta Iwasaki",
+    "url": "https://github.com/lithdew"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/superpowerdotcom/quickjs-bun.git"
+  },
+  "workspaces": [
+    "examples/*"
+  ],
+  "files": [
+    "index.ts",
+    "src",
+    "quickjs/LICENSE",
+    "quickjs/VERSION",
+    "quickjs/cutils.*",
+    "quickjs/dtoa.*",
+    "quickjs/libregexp*",
+    "quickjs/libunicode*",
+    "quickjs/list.h",
+    "quickjs/quickjs.c",
+    "quickjs/quickjs.h",
+    "quickjs/quickjs-atom.h",
+    "quickjs/quickjs-opcode.h"
+  ],
+  "type": "module",
+  "module": "index.ts",
+  "types": "index.ts",
+  "exports": {
+    ".": {
+      "bun": "./index.ts",
+      "types": "./index.ts"
+    }
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "stress": "bun scripts/stress.ts",
+    "test": "bun test",
+    "lint": "oxlint",
+    "fmt": "oxfmt",
+    "fmt:check": "oxfmt --check"
+  },
+  "dependencies": {},
+  "devDependencies": {
+    "@types/bun": "latest",
+    "oxfmt": "^0.51.0",
+    "oxlint": "^1.66.0",
+    "oxlint-tsgolint": "^0.23.0",
+    "typescript": "^5"
+  },
+  "engines": {
+    "bun": ">=1.3.14"
+  }
+}
