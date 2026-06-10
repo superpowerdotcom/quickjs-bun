@@ -1,6 +1,6 @@
 {
   "name": "quickjs-bun",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Lightweight, fully-featured, idiomatic bun:ffi bindings to QuickJS.",
   "keywords": [
     "bun",

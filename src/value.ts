@@ -10,8 +10,22 @@ import {
   QuickJSValueTag,
   type QuickJSPromiseStateValue,
 } from "./ffi";
-import { newCell, optionalUint32, readCString, valueTag } from "./internal";
-import type { HostValue, JSValueType, JSOpaque, JSPrintOptions, JSTypedArrayInfo } from "./types";
+import {
+  MAX_DUMP_NODES,
+  MAX_VALUE_DEPTH,
+  newCell,
+  optionalUint32,
+  readCString,
+  valueTag,
+} from "./internal";
+import type {
+  HostValue,
+  JSDumpOptions,
+  JSValueType,
+  JSOpaque,
+  JSPrintOptions,
+  JSTypedArrayInfo,
+} from "./types";
 
 export class JSValue {
   #disposed = false;
@@ -33,8 +47,8 @@ export class JSValue {
     return out;
   }
 
-  dump(): unknown {
-    return dumpValue(this, new Map());
+  dump(options: JSDumpOptions = {}): unknown {
+    return this.vm.dump(this, options);
   }
 
   errorProperty(name: string): string | undefined {
@@ -646,7 +660,38 @@ function readErrorProperty(handle: JSValue, name: string): string | undefined {
   return primitiveString(value) ?? undefined;
 }
 
-function dumpValue(handle: JSValue, seen: Map<Pointer, unknown>): unknown {
+interface DumpBudget {
+  maxDepth: number;
+  maxNodes: number;
+  nodes: number;
+}
+
+export function dumpHandle(handle: JSValue, options: JSDumpOptions = {}): unknown {
+  const maxDepth = options.maxDepth ?? MAX_VALUE_DEPTH;
+  const maxNodes = options.maxNodes ?? MAX_DUMP_NODES;
+  assert(
+    Number.isSafeInteger(maxDepth) && maxDepth > 0,
+    "maxDepth must be a positive safe integer",
+  );
+  assert(
+    Number.isSafeInteger(maxNodes) && maxNodes > 0,
+    "maxNodes must be a positive safe integer",
+  );
+  return dumpValue(handle, new Map(), 0, { maxDepth, maxNodes, nodes: 0 });
+}
+
+function dumpValue(
+  handle: JSValue,
+  seen: Map<Pointer, unknown>,
+  depth: number,
+  budget: DumpBudget,
+): unknown {
+  if (depth > budget.maxDepth) {
+    throw new RangeError(`QuickJS dump exceeded maximum depth of ${budget.maxDepth}`);
+  }
+  if (++budget.nodes > budget.maxNodes) {
+    throw new RangeError(`QuickJS dump exceeded maximum of ${budget.maxNodes} values`);
+  }
   const type = handle.type;
   switch (type) {
     case "undefined":
@@ -673,7 +718,7 @@ function dumpValue(handle: JSValue, seen: Map<Pointer, unknown>): unknown {
         for (const key of handle.keys()) {
           using value = handle.getProp(key);
           Object.defineProperty(object, key, {
-            value: dumpValue(value, seen),
+            value: dumpValue(value, seen, depth + 1, budget),
             enumerable: true,
             configurable: true,
             writable: true,
@@ -686,7 +731,7 @@ function dumpValue(handle: JSValue, seen: Map<Pointer, unknown>): unknown {
       const length = handle.length;
       for (let index = 0; index < length; index++) {
         using entry = handle.getIndex(index);
-        array.push(dumpValue(entry, seen));
+        array.push(dumpValue(entry, seen, depth + 1, budget));
       }
       return array;
     }

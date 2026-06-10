@@ -13,7 +13,9 @@ export const HOST_REQUEST_ARGC_OFFSET = 4;
 export const HOST_REQUEST_THIS_OFFSET = 8;
 export const HOST_REQUEST_ARGV_OFFSET = 24;
 export const HOST_REQUEST_OUT_OFFSET = 32;
-export const MAX_HOST_FUNCTION_ID = 0x7fffffff;
+export const MAX_HOST_FUNCTION_ID = 0xffff;
+export const MAX_VALUE_DEPTH = 1024;
+export const MAX_DUMP_NODES = 1_000_000;
 export const MIN_INT64 = -(1n << 63n);
 export const MAX_INT64 = (1n << 63n) - 1n;
 export const MAX_UINT64 = (1n << 64n) - 1n;
@@ -50,6 +52,11 @@ export function argvCell(args: readonly JSValue[]): Uint8Array | null {
 export function bytesView(bytes: JSBytes): Uint8Array {
   if (!ArrayBuffer.isView(bytes)) return new Uint8Array(bytes);
   return new Uint8Array(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+}
+
+export function encodeCString(text: string): Uint8Array {
+  assert(!text.includes("\0"), "string must not contain a NUL character");
+  return encoder.encode(`${text}\0`);
 }
 
 export function optionalUint32(value: number | undefined, name: string): number {

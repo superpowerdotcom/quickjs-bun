@@ -2,7 +2,14 @@ import assert from "node:assert/strict";
 import { CString, JSCallback, ptr, read, toArrayBuffer, type Pointer } from "bun:ffi";
 import { QUICKJS_DEFAULT_STACK_SIZE, type QuickJS, type QuickJSNative } from "./ffi";
 import { JSContext } from "./context";
-import { VALUE_CELL_BYTES, bytesView, encoder, pointerKey, throwQuickJSError } from "./internal";
+import {
+  VALUE_CELL_BYTES,
+  bytesView,
+  encodeCString,
+  encoder,
+  pointerKey,
+  throwQuickJSError,
+} from "./internal";
 import { JSModule } from "./module";
 import { JSValue } from "./value";
 import type {
@@ -20,8 +27,8 @@ export class JSRuntime {
   #runtime: Pointer;
   #disposed = false;
   #interruptCallback: JSCallback;
-  #interruptDeadlineMs = 0;
-  #interruptTimedOut = false;
+  #interruptScopes: { own: number; effective: number }[] = [];
+  #interruptDeadlineMs = Number.POSITIVE_INFINITY;
   #contexts = new Set<JSContext>();
   #contextByPointer = new Map<string, JSContext>();
   #moduleLoader?: JSModuleLoader;
@@ -38,8 +45,8 @@ export class JSRuntime {
       "memoryBytes must be a positive safe integer",
     );
     assert(
-      Number.isSafeInteger(stackBytes) && stackBytes >= 0,
-      "stackBytes must be a non-negative safe integer",
+      Number.isSafeInteger(stackBytes) && stackBytes > 0,
+      "stackBytes must be a positive safe integer",
     );
     if (options.gcThresholdBytes !== undefined) {
       assert(
@@ -168,7 +175,7 @@ export class JSRuntime {
   }
 
   setRuntimeInfo(info: string): void {
-    this.#runtimeInfo = encoder.encode(`${info}\0`);
+    this.#runtimeInfo = encodeCString(info);
     this.native.JS_SetRuntimeInfo(this.ptr, this.#runtimeInfo);
   }
 
@@ -321,20 +328,29 @@ export class JSRuntime {
 
   startInterrupt(timeoutMs: number): void {
     assert(Number.isFinite(timeoutMs) && timeoutMs > 0, "timeoutMs must be positive");
-    this.#interruptDeadlineMs = performance.now() + timeoutMs;
-    this.#interruptTimedOut = false;
-    this.native.JS_SetInterruptHandler(this.ptr, this.#interruptCallback.ptr, null);
+    const own = performance.now() + timeoutMs;
+    const parent = this.#interruptScopes.at(-1);
+    const effective = parent === undefined ? own : Math.min(own, parent.effective);
+    this.#interruptScopes.push({ own, effective });
+    this.#interruptDeadlineMs = effective;
+    if (this.#interruptScopes.length === 1) {
+      this.native.JS_SetInterruptHandler(this.ptr, this.#interruptCallback.ptr, null);
+    }
   }
 
   endInterrupt(): boolean {
-    this.native.JS_SetInterruptHandler(this.ptr, null, null);
-    return this.#interruptTimedOut;
+    const scope = this.#interruptScopes.pop();
+    const timedOut = scope !== undefined && performance.now() > scope.own;
+    const parent = this.#interruptScopes.at(-1);
+    this.#interruptDeadlineMs = parent === undefined ? Number.POSITIVE_INFINITY : parent.effective;
+    if (this.#interruptScopes.length === 0) {
+      this.native.JS_SetInterruptHandler(this.ptr, null, null);
+    }
+    return timedOut;
   }
 
   #interrupt(): number {
-    if (performance.now() <= this.#interruptDeadlineMs) return 0;
-    this.#interruptTimedOut = true;
-    return 1;
+    return performance.now() > this.#interruptDeadlineMs ? 1 : 0;
   }
 
   #loadModule(

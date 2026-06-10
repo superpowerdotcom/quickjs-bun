@@ -41,6 +41,7 @@ export type {
   JSValueType,
   JSBytes,
   JSContextOptions,
+  JSDumpOptions,
   JSEvalOptions,
   JSIntrinsic,
   JSIntrinsics,

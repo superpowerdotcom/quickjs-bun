@@ -1238,3 +1238,65 @@ test("rejects invalid runtime limits", () => {
   const instance = vm();
   expect(() => instance.evalCode("1", { timeoutMs: Number.NaN })).toThrow("timeoutMs");
 });
+
+test("keeps the outer timeout armed across re-entrant host calls", () => {
+  const instance = vm({ timeoutMs: 50 });
+  using reenter = instance.newFunction(() => {
+    instance.evalCode("1 + 1").dispose();
+    return instance.undefined;
+  });
+  instance.setGlobal("reenter", reenter);
+  expect(() => instance.evalCode("reenter(); while (true) {}")).toThrow("timed out");
+});
+
+test("rejects a zero stack size that would disable the guest stack guard", () => {
+  expect(() => new JSRuntime({ library, stackBytes: 0 })).toThrow("stackBytes");
+});
+
+test("detects modules without reading past the source buffer", () => {
+  const instance = vm();
+  for (const code of ["", "/", "/*", "\\", "import", "export", "//"]) {
+    expect(typeof instance.detectModule(code)).toBe("boolean");
+  }
+  expect(instance.detectModule("export const value = 1;")).toBe(true);
+  expect(instance.detectModule("const value = 1;")).toBe(false);
+});
+
+test("disposes host argument handles after the call returns", () => {
+  const instance = vm();
+  let saved: JSValue | undefined;
+  using capture = instance.newFunction((arg) => {
+    saved = arg;
+    return instance.newNumber(arg.toNumber());
+  });
+  instance.setGlobal("capture", capture);
+  using result = instance.evalCode("capture(42)");
+  expect(result.toNumber()).toBe(42);
+  expect(saved).toBeDefined();
+  expect(() => saved!.ptr).toThrow("disposed");
+});
+
+test("bounds dump recursion depth instead of overflowing the host stack", () => {
+  const instance = vm({ timeoutMs: 5000 });
+  using deep = instance.evalCode("let o = {}; for (let i = 0; i < 5000; i++) o = { a: o }; o");
+  expect(() => instance.dump(deep)).toThrow("depth");
+  expect(() => instance.dump(deep, { maxDepth: 3 })).toThrow("depth");
+});
+
+test("bounds dump node count for huge collections", () => {
+  const instance = vm({ timeoutMs: 5000 });
+  using wide = instance.evalCode("const a = []; a.length = 5_000_000; a");
+  expect(() => instance.dump(wide, { maxNodes: 1000 })).toThrow("values");
+});
+
+test("times out direct JSValue.dump on malicious getters", () => {
+  const instance = vm({ timeoutMs: 25 });
+  using getter = instance.evalCode("({ get value() { while (true) {} } })");
+  expect(() => getter.dump()).toThrow("timed out");
+});
+
+test("rejects NUL characters in names and filenames", () => {
+  const instance = vm();
+  expect(() => instance.evalCode("1", { filename: "a\0b" })).toThrow("NUL");
+  expect(() => instance.newAtomString("a\0b")).toThrow("NUL");
+});

@@ -63,6 +63,10 @@ export interface JSPrintOptions {
   rawDump?: boolean;
   showHidden?: boolean;
 }
+export interface JSDumpOptions {
+  maxDepth?: number;
+  maxNodes?: number;
+}
 export type JSModuleInit = (module: JSModule) => void;
 export type JSModuleLoader = (
   moduleName: string,

@@ -20,11 +20,13 @@ import {
   MAX_HOST_FUNCTION_ID,
   MAX_INT64,
   MAX_UINT64,
+  MAX_VALUE_DEPTH,
   MIN_INT64,
   VALUE_CELL_BYTES,
   argvCell,
   bytesView,
   defaultIntrinsics,
+  encodeCString,
   encoder,
   newCell,
   throwQuickJSError,
@@ -34,12 +36,12 @@ import {
 } from "./internal";
 import { JSModule } from "./module";
 import { JSRuntime } from "./runtime";
-import { JSValue } from "./value";
+import { JSValue, dumpHandle } from "./value";
 import type {
   HostFunction,
-  HostValue,
   JSBytes,
   JSContextOptions,
+  JSDumpOptions,
   JSEvalOptions,
   JSIntrinsic,
   JSIntrinsics,
@@ -267,13 +269,15 @@ export class JSContext {
   }
 
   detectModule(code: string | Uint8Array): boolean {
-    const source = typeof code === "string" ? encoder.encode(code) : code;
-    return this.native.JS_DetectModule(source, source.length) !== 0;
+    const bytes = typeof code === "string" ? encoder.encode(code) : code;
+    const source = new Uint8Array(bytes.length + 1);
+    source.set(bytes);
+    return this.native.JS_DetectModule(source, bytes.length) !== 0;
   }
 
   parseJson(text: string, options: JSJsonParseOptions = {}): JSValue {
     const source = encoder.encode(text);
-    const filename = encoder.encode(`${options.filename ?? "<json>"}\0`);
+    const filename = encodeCString(options.filename ?? "<json>");
     const out = newCell();
     if (options.flags === undefined || options.flags === 0) {
       this.native.qjs_bun_parse_json(this.ctx, out, source, source.length, filename);
@@ -317,7 +321,7 @@ export class JSContext {
 
   #eval(code: string, thisValue: JSValue | undefined, options: JSEvalOptions): JSValue {
     const source = encoder.encode(`${code}\0`);
-    const filename = encoder.encode(`${options.filename ?? "<eval>"}\0`);
+    const filename = encodeCString(options.filename ?? "<eval>");
     const flags = options.flags ?? QuickJSEvalFlags.TYPE_GLOBAL;
     const out = newCell();
     this.#startInterrupt(options.timeoutMs ?? this.#timeoutMs);
@@ -490,7 +494,7 @@ export class JSContext {
 
   newAtomString(value: string): JSValue {
     const out = newCell();
-    this.native.qjs_bun_new_atom_string(this.ctx, encoder.encode(`${value}\0`), out);
+    this.native.qjs_bun_new_atom_string(this.ctx, encodeCString(value), out);
     return this.resultValue(out);
   }
 
@@ -634,6 +638,7 @@ export class JSContext {
   }
 
   #releaseHostSlot(id: number): void {
+    if (this.#hosts[id] === undefined) return;
     this.#hosts[id] = undefined;
     this.#freeHostSlots.push(id);
   }
@@ -678,7 +683,7 @@ export class JSContext {
     assert(callback.ptr !== null, "Module init callback pointer is null");
     const modulePointer = this.native.JS_NewCModule(
       this.ctx,
-      encoder.encode(`${name}\0`),
+      encodeCString(name),
       callback.ptr,
     ) as Pointer | null;
     if (modulePointer === null) {
@@ -691,6 +696,10 @@ export class JSContext {
   }
 
   newValue(value: unknown): JSValue {
+    return this.#newValue(value, 0);
+  }
+
+  #newValue(value: unknown, depth: number): JSValue {
     if (value instanceof JSValue) {
       this.assertSameVM(value);
       return value.dup();
@@ -705,10 +714,14 @@ export class JSContext {
     if (value instanceof Promise) {
       throw new TypeError("Convert host promises explicitly with newPromise()");
     }
+    assert(
+      depth < MAX_VALUE_DEPTH,
+      `Cannot convert host value nested deeper than ${MAX_VALUE_DEPTH}`,
+    );
     if (Array.isArray(value)) {
       using array = this.newArray();
       for (let index = 0; index < value.length; index++) {
-        using handle = this.newValue(value[index]);
+        using handle = this.#newValue(value[index], depth + 1);
         array.setIndex(index, handle);
       }
       return array.dup();
@@ -726,7 +739,7 @@ export class JSContext {
           descriptor !== undefined && "value" in descriptor,
           "Only data properties can be converted to QuickJS",
         );
-        using handle = this.newValue(descriptor.value);
+        using handle = this.#newValue(descriptor.value, depth + 1);
         object.defineProp(key, handle);
       }
       return object.dup();
@@ -734,12 +747,12 @@ export class JSContext {
     throw new TypeError(`Cannot convert host ${typeof value} to QuickJS`);
   }
 
-  dump(handle: JSValue): unknown {
+  dump(handle: JSValue, options: JSDumpOptions = {}): unknown {
     this.assertSameVM(handle);
     let ended = false;
     this.#startInterrupt(this.#timeoutMs);
     try {
-      return handle.dump();
+      return dumpHandle(handle, options);
     } catch (error) {
       const timedOut = this.#endInterrupt();
       ended = true;
@@ -772,8 +785,8 @@ export class JSContext {
     this.native.qjs_bun_load_module(
       this.ctx,
       out,
-      encoder.encode(`${basename}\0`),
-      encoder.encode(`${filename}\0`),
+      encodeCString(basename),
+      encodeCString(filename),
     );
     return this.resultValue(out);
   }
@@ -804,29 +817,18 @@ export class JSContext {
     const hostId = read.u32(request, HOST_REQUEST_HOST_ID_OFFSET);
     const host = this.#hosts[hostId];
     const argc = read.u32(request, HOST_REQUEST_ARGC_OFFSET);
-    const thisHandle = new JSValue(
-      this,
-      new Uint8Array(toArrayBuffer(request, HOST_REQUEST_THIS_OFFSET, VALUE_CELL_BYTES)),
-      false,
-    );
+    const thisHandle = this.#dupBorrowed(request, HOST_REQUEST_THIS_OFFSET);
+    const args: JSValue[] = [];
     try {
       assert(host !== undefined, "Unknown QuickJS host function");
-      let result: HostValue | void;
-      if (argc === 0) {
-        result = host.call(thisHandle);
-      } else {
+      if (argc > 0) {
         const argv = read.ptr(request, HOST_REQUEST_ARGV_OFFSET) as Pointer | null;
         assert(argv !== null, "Host argv pointer is null");
-        const args = Array.from<JSValue>({ length: argc });
         for (let index = 0; index < argc; index++) {
-          args[index] = new JSValue(
-            this,
-            new Uint8Array(toArrayBuffer(argv, index * VALUE_CELL_BYTES, VALUE_CELL_BYTES)),
-            false,
-          );
+          args.push(this.#dupBorrowed(argv, index * VALUE_CELL_BYTES));
         }
-        result = host.call(thisHandle, ...args);
       }
+      const result = host.call(thisHandle, ...args);
       if (result instanceof JSValue) {
         this.assertSameVM(result);
         this.#finishHostRequest(request, result, false);
@@ -836,8 +838,30 @@ export class JSContext {
         this.#finishHostRequest(request, handle, false);
       }
     } catch (error) {
+      this.#failHostRequest(request, error);
+    } finally {
+      thisHandle.dispose();
+      for (const arg of args) arg.dispose();
+    }
+  }
+
+  #dupBorrowed(source: Pointer, offset: number): JSValue {
+    const borrowed = new JSValue(
+      this,
+      new Uint8Array(toArrayBuffer(source, offset, VALUE_CELL_BYTES)),
+      false,
+    );
+    return borrowed.dup();
+  }
+
+  #failHostRequest(request: Pointer, error: unknown): void {
+    try {
       using handle = this.newError(error instanceof Error ? error : new Error(String(error)));
       this.#finishHostRequest(request, handle, true);
+    } catch (fallbackError) {
+      if (fallbackError instanceof JSException) fallbackError.dispose();
+      const out = new Uint8Array(toArrayBuffer(request, HOST_REQUEST_OUT_OFFSET, VALUE_CELL_BYTES));
+      this.native.qjs_bun_throw_out_of_memory(this.ctx, out);
     }
   }
 

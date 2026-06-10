@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { ptr, type Pointer } from "bun:ffi";
 import { QuickJSAtom } from "./ffi";
 import { JSAtom } from "./atom";
-import { encoder, newCell } from "./internal";
+import { encodeCString, newCell } from "./internal";
 import type { JSContext } from "./context";
 import type { HostValue } from "./types";
 import { JSValue } from "./value";
@@ -14,7 +14,7 @@ export class JSModule {
   ) {}
 
   addExport(name: string): void {
-    if (this.vm.native.JS_AddModuleExport(this.vm.ctx, this.ptr, encoder.encode(`${name}\0`)) < 0) {
+    if (this.vm.native.JS_AddModuleExport(this.vm.ctx, this.ptr, encodeCString(name)) < 0) {
       throw this.vm.getException();
     }
   }
@@ -30,7 +30,7 @@ export class JSModule {
       this.vm.native.qjs_bun_set_module_export(
         this.vm.ctx,
         this.ptr,
-        encoder.encode(`${name}\0`),
+        encodeCString(name),
         ptr(ownedValue),
       ) < 0
     ) {
