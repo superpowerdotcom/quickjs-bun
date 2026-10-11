@@ -1,25 +1,7 @@
 #if defined(__TINYC__)
 #include <stdlib.h>
-/* Keep Bun/TCC compatibility here so vendored QuickJS stays untouched. */
-#if defined(__linux__)
-#define QJS_BUN_TCC_LINUX 1
-#endif
-#if defined(__aarch64__)
-#define QJS_BUN_TCC_ARM64 1
-#if defined(QJS_BUN_TCC_LINUX)
-#define QJS_BUN_TCC_LINUX_ARM64 1
-#endif
-#endif
 static void qjs_bun_abort(void) { abort(); }
 #define abort() for (;;) qjs_bun_abort()
-#if defined(__aarch64__)
-static void *qjs_bun_frame_address(int level) {
-  char stack;
-  (void)level;
-  return &stack;
-}
-#define __builtin_frame_address(level) qjs_bun_frame_address(level)
-#endif
 #if defined(__linux__)
 void *__dso_handle;
 #endif
@@ -28,7 +10,12 @@ int __builtin_clzll(unsigned long long v) { int n = 0; for (; n < 64 && !(v & 0x
 int __builtin_ctz(unsigned int v) { int n = 0; for (; n < 32 && !(v & 1u); n++) v >>= 1; return n; }
 int __builtin_ctzll(unsigned long long v) { int n = 0; for (; n < 64 && !(v & 1ull); n++) v >>= 1; return n; }
 #if defined(__aarch64__)
-/* Preload system headers, then hide arm64 so QuickJS avoids unsupported TCC asm. */
+static void *qjs_bun_frame_address(int level) {
+  char stack;
+  (void)level;
+  return &stack;
+}
+#define __builtin_frame_address(level) qjs_bun_frame_address(level)
 #include <assert.h>
 #include <fenv.h>
 #include <inttypes.h>
@@ -116,95 +103,5 @@ FILE *__acrt_iob_func(unsigned index) {
 }
 #endif
 
-/* QuickJS gates Atomics on !__EMSCRIPTEN__; set it only while including QuickJS. */
-#if !defined(__EMSCRIPTEN__)
-#define __EMSCRIPTEN__ 1
-#define QJS_BUN_RESTORE_EMSCRIPTEN 1
-#endif
-#define CONFIG_STACK_CHECK 1
-#define QJS_BUN_TRACKED_ALLOC 1
-#if defined(QJS_BUN_TRACKED_ALLOC)
-#define JS_NewRuntime qjs_bun_quickjs_new_runtime
-#endif
 #include "../../quickjs/quickjs.c"
-#if defined(QJS_BUN_TRACKED_ALLOC)
-#undef JS_NewRuntime
-#endif
-#if defined(QJS_BUN_RESTORE_EMSCRIPTEN)
-#undef __EMSCRIPTEN__
-#undef QJS_BUN_RESTORE_EMSCRIPTEN
-#endif
-
-#if defined(QJS_BUN_TRACKED_ALLOC)
-#undef malloc
-#undef free
-#undef realloc
-/* Memory limits and usage should not depend on platform malloc_usable_size/_msize behavior. */
-typedef struct QJSBunAllocHeader {
-  size_t size;
-} QJSBunAllocHeader;
-
-static void *qjs_bun_malloc(JSMallocState *state, size_t size) {
-  QJSBunAllocHeader *header;
-  if (state->malloc_size + size > state->malloc_limit)
-    return NULL;
-  header = malloc(sizeof(*header) + size);
-  if (!header)
-    return NULL;
-  header->size = size;
-  state->malloc_count++;
-  state->malloc_size += size + MALLOC_OVERHEAD;
-  return header + 1;
-}
-
-static void qjs_bun_free(JSMallocState *state, void *ptr) {
-  QJSBunAllocHeader *header;
-  if (!ptr)
-    return;
-  header = (QJSBunAllocHeader *)ptr - 1;
-  state->malloc_count--;
-  state->malloc_size -= header->size + MALLOC_OVERHEAD;
-  free(header);
-}
-
-static void *qjs_bun_realloc(JSMallocState *state, void *ptr, size_t size) {
-  QJSBunAllocHeader *header;
-  size_t old_size;
-  if (!ptr)
-    return size ? qjs_bun_malloc(state, size) : NULL;
-  header = (QJSBunAllocHeader *)ptr - 1;
-  old_size = header->size;
-  if (size == 0) {
-    qjs_bun_free(state, ptr);
-    return NULL;
-  }
-  if (state->malloc_size + size - old_size > state->malloc_limit)
-    return NULL;
-  header = realloc(header, sizeof(*header) + size);
-  if (!header)
-    return NULL;
-  header->size = size;
-  state->malloc_size += size - old_size;
-  return header + 1;
-}
-
-static size_t qjs_bun_malloc_usable_size(const void *ptr) {
-  return ptr ? (((const QJSBunAllocHeader *)ptr) - 1)->size : 0;
-}
-static JSRuntime *qjs_bun_new_runtime(void) {
-  JSMallocFunctions functions = {
-    qjs_bun_malloc,
-    qjs_bun_free,
-    qjs_bun_realloc,
-    qjs_bun_malloc_usable_size,
-  };
-  return JS_NewRuntime2(&functions, NULL);
-}
-
-JSRuntime *JS_NewRuntime(void) {
-  return qjs_bun_new_runtime();
-}
-#endif
-
-/* Keep the bridge in this translation unit so Windows/TCC avoids JSValue ABI return edges. */
 #include "quickjs_bridge.c"

@@ -94,6 +94,7 @@ export class JSContext {
 
     try {
       if (intrinsics !== "default") this.addIntrinsics(intrinsics);
+      else this.#hideAtomics();
     } catch (error) {
       this.dispose();
       throw error;
@@ -223,6 +224,7 @@ export class JSContext {
           this.native.JS_AddIntrinsicTypedArrays(this.ctx) >= 0,
           "JS_AddIntrinsicTypedArrays failed",
         );
+        this.#hideAtomics();
         break;
       case "promise":
         assert(this.native.JS_AddIntrinsicPromise(this.ctx) >= 0, "JS_AddIntrinsicPromise failed");
@@ -804,6 +806,13 @@ export class JSContext {
 
   [Symbol.dispose](): void {
     this.dispose();
+  }
+
+  #hideAtomics(): void {
+    const out = newCell();
+    this.native.qjs_bun_get_global(this.ctx, out);
+    using global = new JSValue(this, out, true);
+    global.deleteProp("Atomics");
   }
 
   #timeoutException(): JSException {
