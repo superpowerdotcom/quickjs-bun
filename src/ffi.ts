@@ -164,13 +164,14 @@ export const QuickJSCFunction = {
   CONSTRUCTOR_MAGIC: 3,
   CONSTRUCTOR_OR_FUNC: 4,
   CONSTRUCTOR_OR_FUNC_MAGIC: 5,
-  F_F: 6,
-  F_F_F: 7,
-  GETTER: 8,
-  SETTER: 9,
-  GETTER_MAGIC: 10,
-  SETTER_MAGIC: 11,
-  ITERATOR_NEXT: 12,
+  CONSTRUCTOR_OR_FUNC_FLAGS: 6,
+  F_F: 7,
+  F_F_F: 8,
+  GETTER: 9,
+  SETTER: 10,
+  GETTER_MAGIC: 11,
+  SETTER_MAGIC: 12,
+  ITERATOR_NEXT: 13,
 } as const;
 
 export const QuickJSFunctionListEntry = {

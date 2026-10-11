@@ -52,7 +52,7 @@ afterEach(() => {
 });
 
 test("reports the vendored QuickJS version", () => {
-  expect(QUICKJS_VERSION_TEXT).toBe("2025-09-13");
+  expect(QUICKJS_VERSION_TEXT).toBe("2026-06-04");
 });
 
 test("exposes raw QuickJS bindings and constants to Bun", () => {
@@ -1046,8 +1046,8 @@ test("enforces stack limits", () => {
 });
 
 test("throws constructor exceptions instead of returning exception values", () => {
-  const instance = vm({ memoryBytes: 128 * 1024 });
-  expect(() => instance.newString("x".repeat(128 * 1024))).toThrow(JSException);
+  const instance = vm({ memoryBytes: 256 * 1024 });
+  expect(() => instance.newString("x".repeat(256 * 1024))).toThrow(JSException);
 });
 
 test("sets and gets globals with values", () => {
