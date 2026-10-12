@@ -586,7 +586,8 @@ test("wraps context-level native helpers directly", () => {
 
 test("shares host memory through zero-copy array buffers", () => {
   const instance = vm();
-  const shared = new Uint8Array([1, 2, 3, 4]);
+  const shared = new Uint8Array(new SharedArrayBuffer(4));
+  shared.set([1, 2, 3, 4]);
   using buffer = instance.newArrayBuffer(shared);
   instance.setGlobal("shared", buffer);
   using sum = instance.evalCode("new Uint8Array(shared).reduce((a, b) => a + b, 0)");
@@ -1519,7 +1520,7 @@ test("survives detach and transfer of zero-copy array buffers", () => {
     "shared.transfer(2)",
     "detach",
   ]) {
-    using buffer = instance.newArrayBuffer(new Uint8Array([1, 2, 3, 4]));
+    using buffer = instance.newArrayBuffer(new SharedArrayBuffer(4));
     instance.setGlobal("shared", buffer);
     if (script === "detach") buffer.detachArrayBuffer();
     else instance.evalCode(`globalThis.moved = ${script}`).dispose();
@@ -1771,10 +1772,11 @@ test("rejects misuse that would corrupt the engine", () => {
   expect(() => context.runtime.setMaxStackSize(0)).toThrow(
     "stackBytes must be a positive safe integer",
   );
-  const resizable = new ArrayBuffer(8, { maxByteLength: 16 });
-  expect(() => context.newArrayBuffer(resizable)).toThrow(
-    "newArrayBuffer needs a fixed-length buffer",
-  );
+  for (const buffer of [new ArrayBuffer(8), new SharedArrayBuffer(8, { maxByteLength: 16 })]) {
+    expect(() => context.newArrayBuffer(buffer)).toThrow(
+      "newArrayBuffer shares a fixed-length SharedArrayBuffer",
+    );
+  }
   const other = new QuickJS();
   const runtime = new JSRuntime({ library: other });
   expect(() => other.close()).toThrow("QuickJS library is still used by a runtime");
