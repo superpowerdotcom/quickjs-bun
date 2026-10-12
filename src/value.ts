@@ -230,7 +230,8 @@ export class JSValue {
   }
 
   setOpaque(opaque: Pointer | number | null): void {
-    this.vm.native.qjs_bun_set_opaque(this.ptr, opaque as Pointer | null);
+    const ok = this.vm.native.qjs_bun_set_opaque(this.ptr, opaque as Pointer | null);
+    assert(ok >= 0, "setOpaque needs an object of a registered class");
   }
 
   dump(options: JSDumpOptions = {}): unknown {

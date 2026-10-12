@@ -508,6 +508,7 @@ export class JSContext {
   newArrayBuffer(data: JSBytes): JSValue {
     const view = bytes(data);
     if (view.byteLength === 0) return this.newArrayBufferCopy(view);
+    assert(!(view.buffer as ArrayBuffer).resizable, "newArrayBuffer needs a fixed-length buffer");
     const ctx = this.ctx;
     const id = this.runtime.slot(view);
     const out = new Uint8Array(16);
@@ -536,8 +537,9 @@ export class JSContext {
 
   newTypedArray(type: JSTypedArrayType, ...args: JSValue[]): JSValue {
     this.assertSameVM(...args);
+    const list = args.length > 0 ? args : [this.undefined];
     const out = new Uint8Array(16);
-    this.native.qjs_bun_new_typed_array(this.ctx, out, args.length, argv(args), type);
+    this.native.qjs_bun_new_typed_array(this.ctx, out, list.length, argv(list), type);
     return this.resultValue(out);
   }
 
@@ -654,11 +656,20 @@ export class JSContext {
         case "number":
           return value.toNumber();
         case "bigint":
-          return value.toBigInt();
         case "string":
-          return value.toString();
-        case "error":
-          return value.toError();
+        case "error": {
+          const pointer = value.tag < 0 ? read.ptr(value.ptr) : 0;
+          const existing = seen.get(pointer);
+          if (existing !== undefined) return existing;
+          const converted =
+            type === "bigint"
+              ? value.toBigInt()
+              : type === "string"
+                ? value.toString()
+                : value.toError();
+          if (pointer !== 0) seen.set(pointer, converted);
+          return converted;
+        }
         case "array":
         case "object": {
           const pointer = read.ptr(value.ptr);

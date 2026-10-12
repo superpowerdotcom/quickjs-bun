@@ -740,7 +740,13 @@ void qjs_bun_set_is_html_dda(JSContext *ctx, const JSValue *obj) { JS_SetIsHTMLD
 QJS_RET(void *, qjs_bun_get_opaque, (const JSValue *obj, uint32_t class_id), JS_GetOpaque(*obj, class_id))
 QJS_RET(void *, qjs_bun_get_opaque2, (JSContext * ctx, const JSValue *obj, uint32_t class_id), JS_GetOpaque2(ctx, *obj, class_id))
 QJS_RET(void *, qjs_bun_get_any_opaque, (const JSValue *obj, uint32_t *class_id), JS_GetAnyOpaque(*obj, class_id))
-void qjs_bun_set_opaque(const JSValue *obj, void *opaque) { JS_SetOpaque(*obj, opaque); }
+int qjs_bun_set_opaque(const JSValue *obj, void *opaque) {
+  JSClassID class_id = JS_GetClassID(*obj);
+  if (class_id < JS_CLASS_INIT_COUNT || class_id == qjs_bun_host_class_id)
+    return -1;
+  JS_SetOpaque(*obj, opaque);
+  return 0;
+}
 QJS_OUT(qjs_bun_atom_to_value, (JSContext * ctx, JSValue *out, uint32_t atom), JS_AtomToValue(ctx, atom))
 QJS_OUT(qjs_bun_atom_to_string, (JSContext * ctx, JSValue *out, uint32_t atom), JS_AtomToString(ctx, atom))
 uint32_t qjs_bun_value_to_atom(JSContext *ctx, const JSValue *v) {

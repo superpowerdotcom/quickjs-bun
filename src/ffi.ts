@@ -337,7 +337,7 @@ const symbols = {
   qjs_bun_get_opaque: { args: ["ptr", "u32"], returns: "ptr" },
   qjs_bun_get_opaque2: { args: ["ptr", "ptr", "u32"], returns: "ptr" },
   qjs_bun_get_any_opaque: { args: ["ptr", "buffer"], returns: "ptr" },
-  qjs_bun_set_opaque: { args: ["ptr", "ptr"], returns: "void" },
+  qjs_bun_set_opaque: { args: ["ptr", "ptr"], returns: "i32" },
   qjs_bun_new_array_buffer: {
     args: ["ptr", "buffer", "ptr", "u64", "ptr", "u32"],
     returns: "void",
@@ -386,6 +386,7 @@ export interface QuickJSOptions {
 
 export class QuickJS {
   readonly native: QuickJSNative;
+  runtimes = 0;
   #library: Library<typeof symbols>;
   #compiled?: Library<{ qjs_bun_symbol: { args: ["buffer"]; returns: "ptr" } }>;
   #closed = false;
@@ -427,6 +428,7 @@ export class QuickJS {
 
   close(): void {
     if (this.#closed) return;
+    assert(this.runtimes === 0, "QuickJS library is still used by a runtime");
     this.#closed = true;
     this.#library.close();
     this.#compiled?.close();
