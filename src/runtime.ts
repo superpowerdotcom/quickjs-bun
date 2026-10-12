@@ -45,8 +45,14 @@ export class JSRuntime {
   constructor(options: JSRuntimeOptions) {
     const memoryBytes = options.memoryBytes ?? 64 * 1024 * 1024;
     const stackBytes = options.stackBytes ?? QUICKJS_DEFAULT_STACK_SIZE;
-    assert(Number.isSafeInteger(memoryBytes) && memoryBytes > 0, "memoryBytes must be positive");
-    assert(Number.isSafeInteger(stackBytes) && stackBytes > 0, "stackBytes must be positive");
+    assert(
+      Number.isSafeInteger(memoryBytes) && memoryBytes > 0,
+      "memoryBytes must be a positive safe integer",
+    );
+    assert(
+      Number.isSafeInteger(stackBytes) && stackBytes > 0,
+      "stackBytes must be a positive safe integer",
+    );
     this.library = options.library;
     this.native = this.library.native;
     const runtime = this.native.qjs_bun_new_runtime();
@@ -137,7 +143,7 @@ export class JSRuntime {
 
   registerClass(name: string, options: JSClassOptions & { classId?: number } = {}): number {
     const classId = options.classId ?? this.newClassId();
-    assert(Number.isInteger(classId) && classId > 0, "classId must be a positive integer");
+    assert(Number.isInteger(classId) && classId > 0, "classId must be a positive safe integer");
     let finalizer: JSCallback | undefined;
     if (options.finalizer !== undefined) {
       const callback = options.finalizer;
@@ -184,17 +190,23 @@ export class JSRuntime {
   }
 
   setMemoryLimit(bytes: number): void {
-    assert(Number.isSafeInteger(bytes) && bytes > 0, "memoryBytes must be positive");
+    assert(Number.isSafeInteger(bytes) && bytes > 0, "memoryBytes must be a positive safe integer");
     this.native.JS_SetMemoryLimit(this.ptr, bytes);
   }
 
   setGCThreshold(bytes: number): void {
-    assert(Number.isSafeInteger(bytes) && bytes >= 0, "gcThresholdBytes must be non-negative");
+    assert(
+      Number.isSafeInteger(bytes) && bytes >= 0,
+      "gcThresholdBytes must be a non-negative safe integer",
+    );
     this.native.JS_SetGCThreshold(this.ptr, bytes);
   }
 
   setMaxStackSize(bytes: number): void {
-    assert(Number.isSafeInteger(bytes) && bytes >= 0, "stackBytes must be non-negative");
+    assert(
+      Number.isSafeInteger(bytes) && bytes >= 0,
+      "stackBytes must be a non-negative safe integer",
+    );
     this.native.JS_SetMaxStackSize(this.ptr, bytes);
   }
 
@@ -207,7 +219,7 @@ export class JSRuntime {
   }
 
   setStripInfo(flags: number): void {
-    assert(Number.isInteger(flags) && flags >= 0, "stripInfo must be non-negative");
+    assert(Number.isInteger(flags) && flags >= 0, "stripInfo must be a non-negative safe integer");
     this.native.JS_SetStripInfo(this.ptr, flags);
   }
 
