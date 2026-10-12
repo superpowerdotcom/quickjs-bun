@@ -1050,7 +1050,7 @@ test("throws QuickJS exceptions as host exceptions", () => {
     ["throw undefined", "undefined"],
     ["throw Symbol('x')", "QuickJS symbol was thrown"],
     ["throw ({ get message(){ throw new Error('getter') } })", "QuickJS object was thrown"],
-  ]) {
+  ] as const) {
     try {
       instance.evalCode(source);
     } catch (error) {
