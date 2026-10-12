@@ -509,7 +509,10 @@ export class JSContext {
   newArrayBuffer(data: JSBytes): JSValue {
     const view = bytes(data);
     if (view.byteLength === 0) return this.newArrayBufferCopy(view);
-    assert(!(view.buffer as ArrayBuffer).resizable, "newArrayBuffer needs a fixed-length buffer");
+    assert(
+      view.buffer instanceof SharedArrayBuffer && !view.buffer.growable,
+      "newArrayBuffer shares a fixed-length SharedArrayBuffer",
+    );
     const ctx = this.ctx;
     const id = this.runtime.slot(view);
     const out = new Uint8Array(16);

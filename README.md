@@ -118,7 +118,7 @@ The finalizer runs with the opaque pointer when QuickJS frees the object. `setCl
 
 - `for (const item of handle)` iterates any guest iterable; each yielded `JSValue` is owned.
 - `getProp`, `setProp`, `defineProp`, `hasProp`, `deleteProp`, `getOwnPropertyDescriptor`, and `defineProperty` take string, numeric, or `JSAtom` keys. `keys` returns the enumerable string keys; `ownAtoms` also returns symbols.
-- `newArrayBuffer(view)` shares host memory with the guest without copying; the view is pinned until QuickJS frees the buffer, resizable buffers are refused, and the `ArrayBuffer` must not be transferred meanwhile. `newArrayBufferCopy`, `newTypedArray`, `typedArrayInfo`, and `arrayBufferBytes` cover the copying variants.
+- `newArrayBuffer(view)` shares host memory with the guest without copying. The view must sit on a fixed-length `SharedArrayBuffer`, which the host cannot detach, transfer, or resize, and it stays pinned until QuickJS frees the buffer. `newArrayBufferCopy`, `newTypedArray`, `typedArrayInfo`, and `arrayBufferBytes` cover the copying variants.
 - `newSymbol`, `newDate`, `newBigInt` (any size), `newAtom`, `JSAtom.toValue()`.
 - `runtime.setPromiseRejectionTracker`, `runtime.memoryUsage()`, `runtime.dumpMemoryUsage()`, `runtime.runGC()`, `setStripInfo`, `setCanBlock`, `setRuntimeInfo`.
 - `vm.addIntrinsics([...])` on a context created with `intrinsics: "minimal"` picks which built-ins exist.
