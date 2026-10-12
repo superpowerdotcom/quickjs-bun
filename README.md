@@ -48,6 +48,8 @@ vm.evalCode("(function f() { return f() + 1 })()"); // throws InternalError: sta
 
 `timeoutMs` applies to every operation that can run guest code: evaluation, calls, property access, coercions, JSON, iteration, dumps, and jobs. A getter or proxy trap that spins is interrupted just like a top-level loop. `evalCode` and `executePendingJob` accept a per-call `timeoutMs`.
 
+`stackBytes` bounds the native stack the guest may use, so the recursion depth it allows depends on how the engine was compiled: about 1,150 nested calls per MiB with an optimized build and about 130 with TinyCC, whose unoptimized interpreter frames are far larger. Size it for the build you ship and for the deepest recursion you expect.
+
 ### Converting values
 
 ```typescript
