@@ -755,10 +755,18 @@ QJS_RET(uint8_t *, qjs_bun_get_array_buffer, (JSContext * ctx, uint64_t *size, c
 void qjs_bun_detach_array_buffer(JSContext *ctx, const JSValue *obj) { JS_DetachArrayBuffer(ctx, *obj); }
 QJS_OUT(qjs_bun_get_typed_array_buffer, (JSContext * ctx, JSValue *out, const JSValue *obj, uint64_t *byte_offset, uint64_t *byte_length, uint64_t *bytes_per_element), JS_GetTypedArrayBuffer(ctx, *obj, (size_t *)byte_offset, (size_t *)byte_length, (size_t *)bytes_per_element))
 QJS_OUT(qjs_bun_get_import_meta, (JSContext * ctx, JSValue *out, JSModuleDef *module), JS_GetImportMeta(ctx, module))
-QJS_OUT(qjs_bun_get_module_namespace, (JSContext * ctx, JSValue *out, JSModuleDef *module), JS_GetModuleNamespace(ctx, module))
+void qjs_bun_get_module_namespace(JSContext *ctx, JSValue *out, JSModuleDef *module) {
+  *out = module->func_created ? JS_GetModuleNamespace(ctx, module) : JS_ThrowInternalError(ctx, "module is not instantiated");
+}
 QJS_OUT(qjs_bun_get_module_private_value, (JSContext * ctx, JSValue *out, JSModuleDef *module), JS_GetModulePrivateValue(ctx, module))
 QJS_RET(int, qjs_bun_set_module_private_value, (JSContext * ctx, JSModuleDef *module, const JSValue *v), JS_SetModulePrivateValue(ctx, module, JS_DupValue(ctx, *v)))
-QJS_RET(int, qjs_bun_set_module_export, (JSContext * ctx, JSModuleDef *module, const char *name, const JSValue *v), JS_SetModuleExport(ctx, module, name, JS_DupValue(ctx, *v)))
+int qjs_bun_set_module_export(JSContext *ctx, JSModuleDef *module, const char *name, const JSValue *v) {
+  if (!module->func_created) {
+    JS_ThrowInternalError(ctx, "module is not instantiated");
+    return -1;
+  }
+  return JS_SetModuleExport(ctx, module, name, JS_DupValue(ctx, *v));
+}
 QJS_RET(int, qjs_bun_resolve_module, (JSContext * ctx, const JSValue *v), JS_ResolveModule(ctx, *v))
 QJS_GUEST_OUT(qjs_bun_load_module, (JSContext * ctx, JSValue *out, const char *basename, const char *filename), JS_LoadModule(ctx, basename, filename))
 QJS_GUEST_OUT(qjs_bun_new_typed_array, (JSContext * ctx, JSValue *out, uint32_t argc, JSValue *argv, int type), JS_NewTypedArray(ctx, (int)argc, argv, type))

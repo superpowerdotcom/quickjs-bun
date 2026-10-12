@@ -1586,16 +1586,112 @@ test("does not close an iterator whose next() threw", () => {
   expect(returned.toBoolean()).toBe(false);
 });
 
-test("reports an error when a host function disposes its own context", () => {
+test("refuses to dispose a runtime or a context from inside a host function", () => {
   using runtime = new JSRuntime({ library });
-  const context = runtime.createContext();
-  using suicide = context.newFunction(() => {
-    context.dispose();
-    return "gone";
+  using context = runtime.createContext();
+  using killRuntime = context.newFunction(() => runtime.dispose());
+  using killContext = context.newFunction(() => context.dispose());
+  context.setGlobal("killRuntime", killRuntime);
+  context.setGlobal("killContext", killContext);
+  expect(() => context.evalCode("killRuntime()")).toThrow(
+    "QuickJS runtime cannot be disposed inside a host call",
+  );
+  expect(() => context.evalCode("killContext()")).toThrow(
+    "QuickJS context cannot be disposed inside a host call",
+  );
+  expect(context.disposed).toBe(false);
+  using after = context.evalCode("1 + 1");
+  expect(after.toNumber()).toBe(2);
+});
+
+test("rejects direct and indirect eval flags", () => {
+  using context = vm();
+  expect(() => context.evalCode("1", { flags: QuickJSEvalFlags.TYPE_DIRECT })).toThrow(
+    "flags must evaluate a global script or a module",
+  );
+});
+
+test("rejects disposed values as call arguments", () => {
+  using context = vm();
+  using identity = context.evalCode("(x) => x");
+  const argument = context.newString("gone");
+  argument.dispose();
+  expect(() => context.callFunction(identity, context.undefined, argument)).toThrow(
+    "JSValue is disposed",
+  );
+});
+
+test("rejects unregistered class ids, foreign atoms, and disposed atoms", () => {
+  using context = vm();
+  expect(() => context.newObjectClass(9999)).toThrow("classId is not registered");
+  expect(() => context.getClassProto(9999)).toThrow("classId is not registered");
+  using other = vm();
+  using foreign = other.newAtom("x");
+  using object = context.newObject();
+  expect(() => object.getProp(foreign)).toThrow("JSAtom belongs to another runtime");
+  const own = context.newAtom("y");
+  own.dispose();
+  expect(() => object.getProp(own)).toThrow("QuickJS atom is disposed");
+});
+
+test("rejects registering an already registered class id", () => {
+  using runtime = new JSRuntime({ library });
+  const classId = runtime.registerClass("First");
+  expect(() => runtime.registerClass("Second", { classId })).toThrow(
+    "classId is already registered",
+  );
+});
+
+test("dumps fresh getter results by identity without aliasing them", () => {
+  using context = vm();
+  using value = context.evalCode(
+    "({ get a() { return { x: 1 } }, get b() { return { y: 2 } }, get c() { return [3] } })",
+  );
+  expect(context.dump(value)).toEqual({ a: { x: 1 }, b: { y: 2 }, c: [3] });
+});
+
+test("hands the rejection tracker owned handles that end with the callback", () => {
+  using runtime = new JSRuntime({ library });
+  using context = runtime.createContext();
+  let retained: JSValue | undefined;
+  let message = "";
+  runtime.setPromiseRejectionTracker((rejection) => {
+    retained = rejection.reason;
+    message = rejection.reason.toError().message;
   });
-  context.setGlobal("suicide", suicide);
-  expect(() => context.evalCode("suicide()")).toThrow();
-  expect(context.disposed).toBe(true);
+  context.evalCode("Promise.reject(new Error('later'))").dispose();
+  runtime.executePendingJobs();
+  expect(message).toBe("later");
+  expect(() => retained!.dup()).toThrow("JSValue is disposed");
+});
+
+test("keeps the deadline intact when a module loader fails with a NUL in its message", () => {
+  using runtime = new JSRuntime({ library });
+  using context = runtime.createContext({ timeoutMs: 50 });
+  runtime.setModuleLoader(() => {
+    throw new Error("bad\0name");
+  });
+  let failed = false;
+  try {
+    using result = context.evalCode("import 'x'", { flags: QuickJSEvalFlags.TYPE_MODULE });
+    runtime.executePendingJobs();
+    failed = result.promiseState === QuickJSPromiseState.REJECTED;
+  } catch {
+    failed = true;
+  }
+  expect(failed).toBe(true);
+  Bun.sleepSync(60);
+  using after = context.evalCode("1 + 1");
+  expect(after.toNumber()).toBe(2);
+});
+
+test("refuses module exports before a C module is instantiated", () => {
+  using context = vm();
+  const module = context.newCModule("early", () => {});
+  module.addExport("x");
+  using value = context.newNumber(1);
+  expect(() => module.setExport("x", value)).toThrow("module is not instantiated");
+  expect(() => module.getNamespace()).toThrow("module is not instantiated");
 });
 
 test("registers classes with explicit ids", () => {

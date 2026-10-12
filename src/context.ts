@@ -154,7 +154,9 @@ export class JSContext {
   }
 
   assertSameVM(...values: JSValue[]): void {
-    for (const value of values) assert(value.vm === this, "JSValue belongs to another VM");
+    for (const value of values) {
+      assert(value.vm === this && value.ptr !== 0, "JSValue belongs to another VM");
+    }
   }
 
   hasException(): boolean {
@@ -184,6 +186,7 @@ export class JSContext {
       }
       key = String(key);
     } else if (key instanceof JSAtom) {
+      assert(key.vm.runtime === this.runtime, "JSAtom belongs to another runtime");
       return key.value;
     }
     let atom = this.#atoms.get(key);
@@ -461,6 +464,7 @@ export class JSContext {
   }
 
   newObjectClass(classId: number): JSValue {
+    assert(this.runtime.isRegisteredClass(classId), "classId is not registered");
     const out = new Uint8Array(16);
     this.native.qjs_bun_new_object_class(this.ctx, out, classId);
     return this.resultValue(out);
@@ -468,12 +472,14 @@ export class JSContext {
 
   newObjectProtoClass(prototype: JSValue, classId: number): JSValue {
     this.assertSameVM(prototype);
+    assert(this.runtime.isRegisteredClass(classId), "classId is not registered");
     const out = new Uint8Array(16);
     this.native.qjs_bun_new_object_proto_class(this.ctx, out, prototype.ptr, classId);
     return this.resultValue(out);
   }
 
   getClassProto(classId: number): JSValue {
+    assert(this.runtime.isRegisteredClass(classId), "classId is not registered");
     const out = new Uint8Array(16);
     this.native.qjs_bun_get_class_proto(this.ctx, out, classId);
     return this.resultValue(out);
@@ -481,6 +487,7 @@ export class JSContext {
 
   setClassProto(classId: number, prototype: JSValue): void {
     this.assertSameVM(prototype);
+    assert(this.runtime.isRegisteredClass(classId), "classId is not registered");
     this.native.qjs_bun_set_class_proto(this.ctx, classId, prototype.ptr);
   }
 
@@ -501,10 +508,11 @@ export class JSContext {
   newArrayBuffer(data: JSBytes): JSValue {
     const view = bytes(data);
     if (view.byteLength === 0) return this.newArrayBufferCopy(view);
+    const ctx = this.ctx;
     const id = this.runtime.slot(view);
     const out = new Uint8Array(16);
     this.native.qjs_bun_new_array_buffer(
-      this.ctx,
+      ctx,
       out,
       view,
       view.byteLength,
@@ -538,8 +546,8 @@ export class JSContext {
     this.native.qjs_bun_new_error(this.ctx, out);
     const handle = this.resultValue(out);
     try {
-      using name = this.newString(error.name);
-      using message = this.newString(error.message);
+      using name = this.newString(String(error.name));
+      using message = this.newString(String(error.message));
       handle.defineProp("name", name);
       handle.defineProp("message", message);
       return handle;
@@ -550,9 +558,10 @@ export class JSContext {
   }
 
   newFunction(fn: HostFunction): JSValue {
+    const ctx = this.ctx;
     const id = this.runtime.slot(fn);
     const out = new Uint8Array(16);
-    this.native.qjs_bun_new_host_function(this.ctx, out, this.runtime.hostCallback, id);
+    this.native.qjs_bun_new_host_function(ctx, out, this.runtime.hostCallback, id);
     try {
       return this.resultValue(out);
     } catch (error) {
@@ -590,7 +599,7 @@ export class JSContext {
           return 0;
         } catch (error) {
           const message = error instanceof Error ? error.message : String(error);
-          this.native.qjs_bun_throw_error(context, 4, cstring(message));
+          this.native.qjs_bun_throw_error(context, 4, encoder.encode(`${message}\0`));
           return -1;
         } finally {
           this.runtime.hostDepth--;
@@ -627,6 +636,7 @@ export class JSContext {
     assert(Number.isSafeInteger(maxDepth) && maxDepth > 0, "maxDepth must be a positive integer");
     assert(Number.isSafeInteger(maxNodes) && maxNodes > 0, "maxNodes must be a positive integer");
     const seen = new Map<number, unknown>();
+    const kept: JSValue[] = [];
     let nodes = 0;
     const visit = (value: JSValue, depth: number): unknown => {
       if (depth > maxDepth)
@@ -659,7 +669,8 @@ export class JSContext {
             seen.set(pointer, array);
             const length = value.length;
             for (let index = 0; index < length; index++) {
-              using entry = value.getIndex(index);
+              const entry = value.getIndex(index);
+              kept.push(entry);
               array.push(visit(entry, depth + 1));
             }
             return array;
@@ -667,7 +678,8 @@ export class JSContext {
           const object: Record<string, unknown> = {};
           seen.set(pointer, object);
           for (const key of value.keys()) {
-            using entry = value.getProp(key);
+            const entry = value.getProp(key);
+            kept.push(entry);
             Object.defineProperty(object, key, {
               value: visit(entry, depth + 1),
               enumerable: true,
@@ -694,6 +706,7 @@ export class JSContext {
       this.native.qjs_bun_timeout_error(this.ctx, out);
       throw new JSException(this.resultValue(out));
     } finally {
+      for (const entry of kept) entry.dispose();
       if (!left) this.native.qjs_bun_leave_scope(this.runtime.ptr, scope);
     }
   }
@@ -722,6 +735,7 @@ export class JSContext {
 
   dispose(): void {
     if (this.#disposed) return;
+    assert(this.runtime.hostDepth === 0, "QuickJS context cannot be disposed inside a host call");
     while (this.handles.length > 0) this.handles[this.handles.length - 1]!.dispose();
     for (const atom of this.#atoms.values()) this.native.JS_FreeAtom(this.#context, atom);
     this.#atoms.clear();
@@ -737,6 +751,11 @@ export class JSContext {
   #eval(code: string, thisValue: Pointer | null, options: JSEvalOptions): JSValue {
     const timeoutMs = options.timeoutMs ?? this.#timeoutMs;
     assert(Number.isFinite(timeoutMs) && timeoutMs > 0, "timeoutMs must be positive");
+    const flags = options.flags ?? QuickJSEvalFlags.TYPE_GLOBAL;
+    assert(
+      (flags & QuickJSEvalFlags.TYPE_MASK) <= QuickJSEvalFlags.TYPE_MODULE,
+      "flags must evaluate a global script or a module",
+    );
     const source = encoder.encode(`${code}\0`);
     const out = new Uint8Array(16);
     this.native.qjs_bun_eval(
@@ -746,7 +765,7 @@ export class JSContext {
       source,
       source.length - 1,
       cstring(options.filename ?? "<eval>"),
-      options.flags ?? QuickJSEvalFlags.TYPE_GLOBAL,
+      flags,
       timeoutMs,
     );
     return this.resultValue(out);
