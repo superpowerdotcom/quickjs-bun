@@ -143,9 +143,13 @@ export class JSRuntime {
       const callback = options.finalizer;
       finalizer = new JSCallback(
         (opaque: Pointer | null) => {
+          this.hostDepth++;
           try {
             callback(opaque);
-          } catch {}
+          } catch {
+          } finally {
+            this.hostDepth--;
+          }
         },
         { args: ["ptr"], returns: "void" },
       );
@@ -370,6 +374,7 @@ export class JSRuntime {
 
   #loadModule(pointer: Pointer, name: Pointer, attributes: Pointer): Pointer | null {
     const moduleName = new CString(name) as string;
+    this.hostDepth++;
     try {
       const context = this.contexts.get(pointer);
       assert(context !== undefined, "QuickJS module context is not registered");
@@ -405,10 +410,13 @@ export class JSRuntime {
       const message = error instanceof Error ? error.message : String(error);
       this.native.qjs_bun_throw_error(pointer, 4, cstring(message));
       return null;
+    } finally {
+      this.hostDepth--;
     }
   }
 
   #normalizeModule(pointer: Pointer, base: Pointer, name: Pointer): Pointer | null {
+    this.hostDepth++;
     try {
       const context = this.contexts.get(pointer);
       assert(context !== undefined, "QuickJS module context is not registered");
@@ -423,10 +431,13 @@ export class JSRuntime {
       const message = error instanceof Error ? error.message : String(error);
       this.native.qjs_bun_throw_error(pointer, 4, cstring(message));
       return null;
+    } finally {
+      this.hostDepth--;
     }
   }
 
   #trackRejection(pointer: Pointer, promise: Pointer, reason: Pointer, isHandled: number): void {
+    this.hostDepth++;
     try {
       const context = this.contexts.get(pointer);
       if (context === undefined) return;
@@ -436,6 +447,9 @@ export class JSRuntime {
         promise: new JSValue(context, new Uint8Array(toArrayBuffer(promise, 0, 16)), false),
         reason: new JSValue(context, new Uint8Array(toArrayBuffer(reason, 0, 16)), false),
       });
-    } catch {}
+    } catch {
+    } finally {
+      this.hostDepth--;
+    }
   }
 }

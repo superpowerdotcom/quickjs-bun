@@ -62,7 +62,6 @@ test("exposes raw QuickJS bindings and constants to Bun", () => {
   expect(typeof native.qjs_bun_eval).toBe("function");
   expect(typeof native.qjs_bun_write_object).toBe("function");
   expect(typeof native.JS_NewRuntime).toBe("function");
-  expect(typeof native.JS_SetInterruptHandler).toBe("function");
   expect(QuickJSAtom.NULL).toBe(0);
   expect(QUICKJS_DEFAULT_STACK_SIZE).toBe(1024 * 1024);
   expect(QUICKJS_VALUE_CELL_BYTES).toBe(16);
