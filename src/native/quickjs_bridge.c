@@ -797,7 +797,6 @@ QJS_GUEST_RET(qjs_bun_to_index, (JSContext * ctx, uint64_t *res, const JSValue *
 QJS_GUEST_RET(qjs_bun_to_bigint64, (JSContext * ctx, int64_t *res, const JSValue *v), JS_ToBigInt64(ctx, res, *v))
 QJS_GUEST_RET(qjs_bun_is_instance_of, (JSContext * ctx, const JSValue *v, const JSValue *ctor), JS_IsInstanceOf(ctx, *v, *ctor))
 QJS_GUEST_RET(qjs_bun_ordinary_is_instance_of, (JSContext * ctx, const JSValue *v, const JSValue *ctor), JS_OrdinaryIsInstanceOf(ctx, *v, *ctor))
-QJS_GUEST_OUT(qjs_bun_create_from_constructor, (JSContext * ctx, JSValue *out, const JSValue *ctor, int class_id), JS_CreateFromConstructor(ctx, *ctor, class_id))
 QJS_GUEST_OUT(qjs_bun_get_property, (JSContext * ctx, JSValue *out, const JSValue *obj, uint32_t atom), JS_GetProperty(ctx, *obj, atom))
 QJS_GUEST_OUT(qjs_bun_get_property_internal, (JSContext * ctx, JSValue *out, const JSValue *obj, uint32_t atom, const JSValue *receiver, int throw_ref_error), JS_GetPropertyInternal(ctx, *obj, atom, *receiver, throw_ref_error))
 QJS_GUEST_OUT(qjs_bun_get_property_u32, (JSContext * ctx, JSValue *out, const JSValue *obj, uint32_t index), JS_GetPropertyUint32(ctx, *obj, index))
@@ -848,7 +847,7 @@ QJS_GUEST_RET(qjs_bun_iterator_close, (JSContext * ctx, const JSValue *iterator,
   X(qjs_bun_to_int32) X(qjs_bun_to_int32_sat) X(qjs_bun_to_uint32) X(qjs_bun_to_int64) X(qjs_bun_to_int64_ext) X(qjs_bun_to_index) X(qjs_bun_to_bigint64) \
   X(qjs_bun_strict_eq) X(qjs_bun_same_value) X(qjs_bun_same_value_zero) \
   X(qjs_bun_is_function) X(qjs_bun_is_constructor) X(qjs_bun_is_array) X(qjs_bun_is_error) X(qjs_bun_is_instance_of) X(qjs_bun_ordinary_is_instance_of) \
-  X(qjs_bun_set_constructor_bit) X(qjs_bun_set_constructor) X(qjs_bun_set_is_html_dda) X(qjs_bun_create_from_constructor) \
+  X(qjs_bun_set_constructor_bit) X(qjs_bun_set_constructor) X(qjs_bun_set_is_html_dda) \
   X(qjs_bun_get_property) X(qjs_bun_get_property_internal) X(qjs_bun_get_data_property) X(qjs_bun_get_property_u32) \
   X(qjs_bun_set_property) X(qjs_bun_set_property_internal) X(qjs_bun_set_property_u32) X(qjs_bun_set_property_i64) \
   X(qjs_bun_has_property) X(qjs_bun_delete_property) X(qjs_bun_define_property) X(qjs_bun_define_property_value) \
@@ -862,7 +861,7 @@ QJS_GUEST_RET(qjs_bun_iterator_close, (JSContext * ctx, const JSValue *iterator,
   X(qjs_bun_get_iterator) X(qjs_bun_iterator_next) X(qjs_bun_iterator_close) \
   X(JS_NewCModule) X(JS_AddModuleExport) X(qjs_bun_set_module_export) X(JS_GetModuleName) X(qjs_bun_get_import_meta) \
   X(qjs_bun_get_module_namespace) X(qjs_bun_get_module_private_value) X(qjs_bun_set_module_private_value) \
-  X(qjs_bun_resolve_module) X(qjs_bun_load_module) X(qjs_bun_compile_module) X(qjs_bun_set_import_meta) \
+  X(qjs_bun_resolve_module) X(qjs_bun_load_module) X(qjs_bun_compile_module) \
   X(qjs_bun_print) X(qjs_bun_timeout_error) X(qjs_bun_enter_scope) X(qjs_bun_leave_scope) X(js_malloc) X(js_free) X(js_malloc_rt) X(js_free_rt)
 
 #define QJS_BUN_SYMBOL_ENTRY(name) {#name, (const void *)name},
