@@ -46,7 +46,7 @@ vm.evalCode("const a = []; while (true) a.push('x'.repeat(1e4))"); // throws Int
 vm.evalCode("(function f() { return f() + 1 })()"); // throws InternalError: stack overflow
 ```
 
-`timeoutMs` applies to every operation that can run guest code: evaluation, calls, property access, coercions, JSON, iteration, dumps, and jobs. A getter or proxy trap that spins is interrupted just like a top-level loop. `evalCode` and `executePendingJob` accept a per-call `timeoutMs`.
+`timeoutMs` applies to every operation that can run guest code: evaluation, calls, property access, coercions, JSON, iteration, dumps, and jobs. A getter or proxy trap that spins is interrupted just like a top-level loop, and once the deadline has passed every further step re-interrupts, so neither an `async` body that turns the interrupt into a rejection nor a host function that rethrows it can keep the guest running. `evalCode` and `executePendingJob` accept a per-call `timeoutMs`.
 
 `stackBytes` bounds the native stack the guest may use, so the recursion depth it allows depends on how the engine was compiled: about 1,150 nested calls per MiB with an optimized build and about 130 with TinyCC, whose unoptimized interpreter frames are far larger. Size it for the build you ship and for the deepest recursion you expect.
 
@@ -160,6 +160,7 @@ Per-operation costs with the optimized build: creating a runtime with a context 
 - No `std` or `os` modules, no `Atomics`, and no `Intl` or `Temporal`: the guest has nothing but the language until you hand it host functions.
 - Values never cross contexts. Passing a `JSValue` from one `JSContext` to another throws.
 - A `JSException` owns its guest value; dispose it when you are done, or read `.name`, `.message`, and `.stack`, which are copied eagerly.
+- Every module evaluated with `TYPE_MODULE` stays registered in its context until the context is disposed, so evaluate untrusted snippets as scripts (`TYPE_GLOBAL`, with `ASYNC` for top-level `await`) when a context is reused.
 - `TimeoutError` is raised when the deadline of the call you made expires. Code interrupted inside an async function surfaces as a rejected promise whose reason is `InternalError: interrupted`.
 - Close the `QuickJS` library only after every runtime is disposed.
 - Disposing a context releases its heap at the next `runtime.runGC()` or when the runtime is disposed, because the global object sits in a reference cycle. A runtime that outlives many contexts should run the GC after disposing each one.

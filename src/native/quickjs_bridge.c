@@ -64,8 +64,12 @@ typedef struct QJSBunScope {
 static JSClassID qjs_bun_host_class_id;
 
 static int qjs_bun_interrupt(JSRuntime *rt, void *opaque) {
-  (void)rt;
-  return qjs_bun_now_ms() >= ((QJSBunRuntime *)opaque)->deadline_ms;
+  if (qjs_bun_now_ms() < ((QJSBunRuntime *)opaque)->deadline_ms)
+    return 0;
+  struct list_head *el;
+  list_for_each(el, &rt->context_list)
+    list_entry(el, JSContext, link)->interrupt_counter = 2;
+  return 1;
 }
 
 static QJSBunRuntime *qjs_bun_state(JSRuntime *rt) {
@@ -482,8 +486,8 @@ void qjs_bun_new_host_function(JSContext *ctx, JSValue *out, QJSBunHostCallback 
   slot->callback = callback;
   slot->host_id = host_id;
   JS_SetOpaque(fn, slot);
-  js_function_set_properties(ctx, fn, JS_ATOM_empty_string, 0);
-  if (JS_HasException(ctx)) {
+  if (JS_DefinePropertyValue(ctx, fn, JS_ATOM_length, JS_NewInt32(ctx, 0), JS_PROP_CONFIGURABLE) < 0 ||
+      JS_DefinePropertyValue(ctx, fn, JS_ATOM_name, JS_AtomToString(ctx, JS_ATOM_empty_string), JS_PROP_CONFIGURABLE) < 0) {
     JS_FreeValue(ctx, fn);
     fn = JS_EXCEPTION;
   }

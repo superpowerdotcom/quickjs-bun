@@ -199,7 +199,7 @@ export class JSContext {
       atom = key.isWellFormed()
         ? this.native.JS_NewAtomLen(this.ctx, text, text.length)
         : this.newAtom(key).value;
-      assert(atom !== QuickJSAtom.NULL, "QuickJS atom did not initialize");
+      if (atom === QuickJSAtom.NULL) throw this.getException();
       this.#atoms.set(key, atom);
     }
     return atom;
@@ -213,7 +213,7 @@ export class JSContext {
     }
     const text = encoder.encode(value);
     const atom = this.native.JS_NewAtomLen(this.ctx, text, text.length);
-    assert(atom !== QuickJSAtom.NULL, "QuickJS atom did not initialize");
+    if (atom === QuickJSAtom.NULL) throw this.getException();
     return new JSAtom(this, atom, true);
   }
 
@@ -223,7 +223,7 @@ export class JSContext {
       "atom value must be a uint32",
     );
     const atom = this.native.JS_NewAtomUInt32(this.ctx, value);
-    assert(atom !== QuickJSAtom.NULL, "QuickJS atom did not initialize");
+    if (atom === QuickJSAtom.NULL) throw this.getException();
     return new JSAtom(this, atom, true);
   }
 
