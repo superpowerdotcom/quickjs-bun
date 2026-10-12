@@ -33,7 +33,7 @@ using result = vm.evalCode("[1, 2, 3].map((x) => x * 2)");
 console.log(vm.dump(result)); // [2, 4, 6]
 ```
 
-`JSValue`, `JSAtom`, `JSContext`, `JSRuntime`, and `QuickJS` all implement `Symbol.dispose`. Call `.dispose()` yourself on anything that outlives its scope; a handle that is never disposed keeps its guest object alive.
+`JSValue`, `JSAtom`, `JSContext`, `JSRuntime`, and `QuickJS` all implement `Symbol.dispose`. Call `.dispose()` yourself on anything that outlives its scope; a handle that is never disposed keeps its guest object alive until its context is disposed, at which point the context releases every handle it still tracks (`vm.handles`).
 
 ### Limits
 

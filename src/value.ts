@@ -38,6 +38,7 @@ const types: readonly JSValueType[] = [
 
 export class JSValue {
   readonly #address: Pointer;
+  #slot = -1;
   #disposed = false;
 
   constructor(
@@ -46,6 +47,10 @@ export class JSValue {
     readonly owned: boolean,
   ) {
     this.#address = ptr(cell);
+    if (owned && read.i32(this.#address, 8) < 0) {
+      this.#slot = vm.handles.length;
+      vm.handles.push(this);
+    }
   }
 
   get ptr(): Pointer {
@@ -791,11 +796,15 @@ export class JSValue {
 
   dispose(): void {
     if (!this.owned || this.#disposed) return;
-    const refcounted = this.tag < 0;
     this.#disposed = true;
-    if (refcounted && !this.vm.disposed) {
-      this.vm.native.qjs_bun_free_value(this.vm.ctx, this.#address);
+    if (this.#slot < 0) return;
+    const { handles } = this.vm;
+    const last = handles.pop()!;
+    if (last !== this) {
+      handles[this.#slot] = last;
+      last.#slot = this.#slot;
     }
+    if (!this.vm.disposed) this.vm.native.qjs_bun_free_value(this.vm.ctx, this.#address);
   }
 
   [Symbol.dispose](): void {
