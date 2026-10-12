@@ -246,6 +246,7 @@ const symbols = {
   qjs_bun_new_bigint64: { args: ["ptr", "buffer", "i64"], returns: "void" },
   qjs_bun_new_biguint64: { args: ["ptr", "buffer", "u64"], returns: "void" },
   qjs_bun_new_bigint128: { args: ["ptr", "buffer", "u64", "u64"], returns: "void" },
+  qjs_bun_new_bigint_string: { args: ["ptr", "buffer", "buffer", "u64"], returns: "void" },
   qjs_bun_to_bigint128: { args: ["ptr", "buffer", "buffer", "ptr"], returns: "i32" },
   qjs_bun_new_symbol: { args: ["ptr", "buffer", "buffer", "i32"], returns: "void" },
   qjs_bun_new_object: { args: ["ptr", "buffer"], returns: "void" },
