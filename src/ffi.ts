@@ -288,7 +288,6 @@ const symbols = {
   qjs_bun_set_constructor_bit: { args: ["ptr", "ptr", "i32"], returns: "i32" },
   qjs_bun_set_constructor: { args: ["ptr", "ptr", "ptr"], returns: "i32" },
   qjs_bun_set_is_html_dda: { args: ["ptr", "ptr"], returns: "void" },
-  qjs_bun_create_from_constructor: { args: ["ptr", "buffer", "ptr", "i32"], returns: "void" },
   qjs_bun_get_property: { args: ["ptr", "buffer", "ptr", "u32"], returns: "void" },
   qjs_bun_get_property_internal: {
     args: ["ptr", "buffer", "ptr", "u32", "ptr", "i32"],
@@ -365,7 +364,6 @@ const symbols = {
   qjs_bun_resolve_module: { args: ["ptr", "ptr"], returns: "i32" },
   qjs_bun_load_module: { args: ["ptr", "buffer", "buffer", "buffer"], returns: "void" },
   qjs_bun_compile_module: { args: ["ptr", "buffer", "u64", "buffer"], returns: "ptr" },
-  qjs_bun_set_import_meta: { args: ["ptr", "ptr", "i32"], returns: "i32" },
   qjs_bun_print: {
     args: ["ptr", "ptr", "i32", "i32", "u32", "u32", "u32", "buffer"],
     returns: "ptr",

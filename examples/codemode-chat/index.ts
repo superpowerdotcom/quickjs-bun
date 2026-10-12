@@ -69,21 +69,6 @@ tools.setProp("list", list);
 tools.setProp("wiki", wiki);
 vm.setGlobal("tools", tools);
 
-async function evaluate(code: string): Promise<unknown> {
-  using result = vm.evalCode(code, {
-    filename: "<repl>",
-    flags: QuickJSEvalFlags.TYPE_GLOBAL | QuickJSEvalFlags.ASYNC,
-  });
-  while (result.promiseState === QuickJSPromiseState.PENDING) {
-    if (runtime.executePendingJob()) continue;
-    if (pending.size === 0) throw new Error("the snippet is waiting on nothing");
-    await Promise.race(pending);
-  }
-  using settled = result.promiseResult();
-  if (result.promiseState === QuickJSPromiseState.REJECTED) throw new JSException(settled.dup());
-  return (vm.dump(settled) as { value: unknown }).value;
-}
-
 const repl = defineTool({
   name: "quickjs_repl",
   description:
@@ -93,7 +78,20 @@ const repl = defineTool({
   async execute({ code }) {
     console.log(`\n[quickjs]\n${code}`);
     try {
-      const text = Bun.inspect(await evaluate(code), { depth: 10 });
+      using result = vm.evalCode(code, {
+        filename: "<repl>",
+        flags: QuickJSEvalFlags.TYPE_GLOBAL | QuickJSEvalFlags.ASYNC,
+      });
+      while (result.promiseState === QuickJSPromiseState.PENDING) {
+        if (runtime.executePendingJob()) continue;
+        if (pending.size === 0) throw new Error("the snippet is waiting on nothing");
+        await Promise.race(pending);
+      }
+      using settled = result.promiseResult();
+      if (result.promiseState === QuickJSPromiseState.REJECTED) {
+        throw new JSException(settled.dup());
+      }
+      const text = Bun.inspect((vm.dump(settled) as { value: unknown }).value, { depth: 10 });
       console.log(`[result] ${text}`);
       return { content: [{ type: "text", text }] };
     } catch (error) {
