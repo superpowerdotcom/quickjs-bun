@@ -216,6 +216,7 @@ export class JSValue {
   }
 
   getOpaque2(classId: number): Pointer | null {
+    assert(this.vm.runtime.isRegisteredClass(classId), "classId is not registered");
     const opaque = this.vm.native.qjs_bun_get_opaque2(this.vm.ctx, this.ptr, classId);
     if (typeof opaque === "number") return opaque;
     if (this.vm.hasException()) throw this.vm.getException();
@@ -874,36 +875,40 @@ export class JSValue {
 }
 
 export class JSAtom {
+  readonly #value: number;
   #disposed = false;
 
   constructor(
     readonly vm: JSContext,
-    readonly value: number,
+    value: number,
     readonly owned: boolean,
-  ) {}
+  ) {
+    this.#value = value;
+  }
+
+  get value(): number {
+    assert(!this.#disposed, "QuickJS atom is disposed");
+    return this.#value;
+  }
 
   dup(): JSAtom {
-    assert(!this.#disposed, "QuickJS atom is disposed");
     if ((this.value & QuickJSAtom.TAG_INT) !== 0) return new JSAtom(this.vm, this.value, false);
     return new JSAtom(this.vm, this.vm.native.JS_DupAtom(this.vm.ctx, this.value), true);
   }
 
   toValue(): JSValue {
-    assert(!this.#disposed, "QuickJS atom is disposed");
     const out = new Uint8Array(16);
     this.vm.native.qjs_bun_atom_to_value(this.vm.ctx, out, this.value);
     return this.vm.resultValue(out);
   }
 
   toStringValue(): JSValue {
-    assert(!this.#disposed, "QuickJS atom is disposed");
     const out = new Uint8Array(16);
     this.vm.native.qjs_bun_atom_to_string(this.vm.ctx, out, this.value);
     return this.vm.resultValue(out);
   }
 
   toString(): string {
-    assert(!this.#disposed, "QuickJS atom is disposed");
     if ((this.value & QuickJSAtom.TAG_INT) !== 0) return String(this.value & QuickJSAtom.MAX_INT);
     const size = new BigUint64Array(1);
     const text = this.vm.native.JS_AtomToCStringLen(this.vm.ctx, size, this.value);
@@ -919,8 +924,8 @@ export class JSAtom {
   dispose(): void {
     if (!this.owned || this.#disposed) return;
     this.#disposed = true;
-    if ((this.value & QuickJSAtom.TAG_INT) === 0 && !this.vm.disposed) {
-      this.vm.native.JS_FreeAtom(this.vm.ctx, this.value);
+    if ((this.#value & QuickJSAtom.TAG_INT) === 0 && !this.vm.disposed) {
+      this.vm.native.JS_FreeAtom(this.vm.ctx, this.#value);
     }
   }
 

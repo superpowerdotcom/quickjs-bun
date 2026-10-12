@@ -59,7 +59,7 @@ using total = vm.evalCode("user.scores.reduce((a, b) => a + b, 0)");
 vm.dump(total); // 60
 ```
 
-`newValue` accepts `undefined`, `null`, booleans, numbers, bigints, strings, `Error`s, plain objects, arrays, and existing `JSValue`s. Plain JSON trees are parsed by QuickJS in one call. `dump` is the inverse: it walks guest objects by identity (cycles survive), converts errors to `Error`, bigints to `bigint`, and refuses functions and symbols. `JSValue` also offers typed accessors (`toNumber`, `toString`, `toBigInt`, `toBoolean`, `toError`, `toDate`), coercions (`coerceToNumber`, `coerceToString`, `coerceToPrimitive`, ...), and `print()` for QuickJS's own inspector output.
+`newValue` accepts `undefined`, `null`, booleans, numbers, bigints, strings, `Error`s, plain objects, arrays, and existing `JSValue`s. Plain JSON trees are parsed by QuickJS in one call. `dump` is the inverse: it walks guest objects by identity (cycles survive), converts errors to `Error`, bigints to `bigint`, and refuses functions and symbols. It reads own enumerable properties only, so a `Date`, `Map`, `Set`, or typed array comes back as a plain object; use `toDate`, `arrayBufferBytes`, or convert such values in the guest first. `JSValue` also offers typed accessors (`toNumber`, `toString`, `toBigInt`, `toBoolean`, `toError`, `toDate`), coercions (`coerceToNumber`, `coerceToString`, `coerceToPrimitive`, ...), and `print()` for QuickJS's own inspector output.
 
 ### Host functions
 
@@ -118,7 +118,7 @@ The finalizer runs with the opaque pointer when QuickJS frees the object. `setCl
 
 - `for (const item of handle)` iterates any guest iterable; each yielded `JSValue` is owned.
 - `getProp`, `setProp`, `defineProp`, `hasProp`, `deleteProp`, `getOwnPropertyDescriptor`, and `defineProperty` take string, numeric, or `JSAtom` keys. `keys` returns the enumerable string keys; `ownAtoms` also returns symbols.
-- `newArrayBuffer(view)` shares host memory with the guest without copying; the view is pinned until QuickJS frees the buffer. `newArrayBufferCopy`, `newTypedArray`, `typedArrayInfo`, and `arrayBufferBytes` cover the copying variants.
+- `newArrayBuffer(view)` shares host memory with the guest without copying; the view is pinned until QuickJS frees the buffer, and its `ArrayBuffer` must not be resized or transferred meanwhile. `newArrayBufferCopy`, `newTypedArray`, `typedArrayInfo`, and `arrayBufferBytes` cover the copying variants.
 - `newSymbol`, `newDate`, `newBigInt` (any size), `newAtom`, `JSAtom.toValue()`.
 - `runtime.setPromiseRejectionTracker`, `runtime.memoryUsage()`, `runtime.dumpMemoryUsage()`, `runtime.runGC()`, `setStripInfo`, `setCanBlock`, `setRuntimeInfo`.
 - `vm.addIntrinsics([...])` on a context created with `intrinsics: "minimal"` picks which built-ins exist.
@@ -163,7 +163,7 @@ Per-operation costs with the optimized build: creating a runtime with a context 
 - `TimeoutError` is raised when the deadline of the call you made expires. Code interrupted inside an async function surfaces as a rejected promise whose reason is `InternalError: interrupted`.
 - Close the `QuickJS` library only after every runtime is disposed.
 - Disposing a context releases its heap at the next `runtime.runGC()` or when the runtime is disposed, because the global object sits in a reference cycle. A runtime that outlives many contexts should run the GC after disposing each one.
-- Lone surrogates survive both directions (`newString`, `newValue`, `toString`, `keys`, atoms); C strings handed to QuickJS by name (filenames, module and symbol names) must be well-formed.
+- Lone surrogates survive both directions (`newString`, `newValue`, `toString`, `keys`, atoms); source text, JSON text, and C strings handed to QuickJS by name (filenames, module and symbol names) must be well-formed.
 
 ## Examples
 
