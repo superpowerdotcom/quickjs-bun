@@ -84,7 +84,7 @@ runtime.executePendingJobs();
 using result = chained.promiseResult(); // 42
 ```
 
-Pass `QuickJSEvalFlags.ASYNC` to `evalCode` for top-level `await`; the result is a promise whose fulfillment value is `{ value }`. `examples/sandbox` shows a complete loop that interleaves guest jobs with host timers.
+Pass `QuickJSEvalFlags.ASYNC` to `evalCode` for top-level `await`; the result is a promise whose fulfillment value is `{ value }`. `examples/sandbox` shows a complete loop that interleaves guest jobs with host timers. `executePendingJobs` runs until the queue is empty, which a guest can postpone forever by scheduling a microtask from every microtask; when the code is untrusted, call `executePendingJob` yourself and cap the count.
 
 ### Modules
 
@@ -115,7 +115,7 @@ The finalizer runs with the opaque pointer when QuickJS frees the object. `setCl
 ### Everything else
 
 - `for (const item of handle)` iterates any guest iterable; each yielded `JSValue` is owned.
-- `getProp`, `setProp`, `defineProp`, `hasProp`, `deleteProp`, `getOwnPropertyDescriptor`, `defineProperty`, `keys`, and `ownAtoms` take string, numeric, or `JSAtom` keys.
+- `getProp`, `setProp`, `defineProp`, `hasProp`, `deleteProp`, `getOwnPropertyDescriptor`, and `defineProperty` take string, numeric, or `JSAtom` keys. `keys` returns the enumerable string keys; `ownAtoms` also returns symbols.
 - `newArrayBuffer(view)` shares host memory with the guest without copying; the view is pinned until QuickJS frees the buffer. `newArrayBufferCopy`, `newTypedArray`, `typedArrayInfo`, and `arrayBufferBytes` cover the copying variants.
 - `newSymbol`, `newDate`, `newBigInt` (any size), `newAtom`, `JSAtom.toValue()`.
 - `runtime.setPromiseRejectionTracker`, `runtime.memoryUsage()`, `runtime.dumpMemoryUsage()`, `runtime.runGC()`, `setStripInfo`, `setCanBlock`, `setRuntimeInfo`.

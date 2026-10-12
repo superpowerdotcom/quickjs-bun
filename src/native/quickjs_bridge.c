@@ -803,7 +803,7 @@ QJS_GUEST_RET(qjs_bun_iterator_close, (JSContext * ctx, const JSValue *iterator,
   X(JS_SetRuntimeOpaque) X(JS_GetRuntimeOpaque) X(JS_ComputeMemoryUsage) X(qjs_bun_dump_memory_usage) \
   X(JS_SetCanBlock) X(JS_SetStripInfo) X(JS_GetStripInfo) X(JS_IsJobPending) X(qjs_bun_execute_pending_job) \
   X(JS_NewClassID) X(JS_NewClass) X(qjs_bun_new_class) X(JS_IsRegisteredClass) \
-  X(qjs_bun_set_module_loader) X(qjs_bun_set_promise_rejection_tracker) X(JS_SetInterruptHandler) X(JS_SetSharedArrayBufferFunctions) \
+  X(qjs_bun_set_module_loader) X(qjs_bun_set_promise_rejection_tracker) X(JS_SetSharedArrayBufferFunctions) \
   X(JS_FreeAtomRT) X(qjs_bun_dup_value_rt) X(qjs_bun_free_value_rt) X(qjs_bun_is_live_object) \
   X(JS_NewContext) X(JS_NewContextRaw) X(JS_FreeContext) X(JS_DupContext) X(JS_GetRuntime) X(qjs_bun_new_context) X(qjs_bun_free_context) \
   X(JS_SetContextOpaque) X(JS_GetContextOpaque) X(qjs_bun_add_intrinsic) \

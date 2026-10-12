@@ -178,7 +178,6 @@ const symbols = {
   JS_IsRegisteredClass: { args: ["ptr", "u32"], returns: "i32" },
   qjs_bun_set_module_loader: { args: ["ptr", "ptr", "ptr"], returns: "void" },
   qjs_bun_set_promise_rejection_tracker: { args: ["ptr", "ptr"], returns: "void" },
-  JS_SetInterruptHandler: { args: ["ptr", "ptr", "ptr"], returns: "void" },
   JS_SetSharedArrayBufferFunctions: { args: ["ptr", "ptr"], returns: "void" },
   JS_FreeAtomRT: { args: ["ptr", "u32"], returns: "void" },
   qjs_bun_dup_value_rt: { args: ["ptr", "buffer", "ptr"], returns: "void" },

@@ -572,6 +572,7 @@ export class JSContext {
     let module: JSModule | undefined;
     const callback = new JSCallback(
       (context: Pointer) => {
+        this.runtime.hostDepth++;
         try {
           init(module!);
           return 0;
@@ -579,6 +580,8 @@ export class JSContext {
           const message = error instanceof Error ? error.message : String(error);
           this.native.qjs_bun_throw_error(context, 4, cstring(message));
           return -1;
+        } finally {
+          this.runtime.hostDepth--;
         }
       },
       { args: ["ptr", "ptr"], returns: "i32" },
