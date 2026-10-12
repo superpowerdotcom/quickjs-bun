@@ -7864,8 +7864,11 @@ JSValue JS_ThrowOutOfMemory(JSContext *ctx)
 {
     JSRuntime *rt = ctx->rt;
     if (!rt->in_out_of_memory) {
+        size_t malloc_limit = rt->malloc_ctx.malloc_state.malloc_limit;
         rt->in_out_of_memory = TRUE;
+        rt->malloc_ctx.malloc_state.malloc_limit = (size_t)-1;
         JS_ThrowInternalError(ctx, "out of memory");
+        rt->malloc_ctx.malloc_state.malloc_limit = malloc_limit;
         rt->in_out_of_memory = FALSE;
     }
     return JS_EXCEPTION;

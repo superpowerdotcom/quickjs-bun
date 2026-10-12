@@ -1,207 +1,76 @@
-import { CString, JSCallback, ptr, read, toArrayBuffer, type Pointer } from "bun:ffi";
 import assert from "node:assert/strict";
-import { JSAtom } from "./atom";
+import { CString, ptr, read, toArrayBuffer, type Pointer } from "bun:ffi";
 import type { JSContext } from "./context";
 import {
+  cstring,
   QuickJSAtom,
   QuickJSGetOwnPropertyNamesFlags,
+  QuickJSPrimitiveHint,
   QuickJSPromiseState,
   QuickJSPropertyFlags,
   QuickJSValueTag,
   type QuickJSPromiseStateValue,
 } from "./ffi";
-import {
-  MAX_DUMP_NODES,
-  MAX_VALUE_DEPTH,
-  newCell,
-  optionalUint32,
-  readCString,
-  valueTag,
-} from "./internal";
 import type {
   HostValue,
   JSDumpOptions,
-  JSValueType,
   JSOpaque,
   JSPrintOptions,
+  JSPropertyDefinition,
+  JSPropertyDescriptor,
   JSTypedArrayInfo,
+  JSValueType,
 } from "./types";
 
+const types: readonly JSValueType[] = [
+  "undefined",
+  "null",
+  "boolean",
+  "number",
+  "bigint",
+  "string",
+  "symbol",
+  "object",
+  "function",
+  "array",
+  "error",
+];
+
 export class JSValue {
+  readonly #address: Pointer;
   #disposed = false;
 
   constructor(
     readonly vm: JSContext,
     readonly cell: Uint8Array,
     readonly owned: boolean,
-  ) {}
+  ) {
+    this.#address = ptr(cell);
+  }
 
   get ptr(): Pointer {
     assert(!this.#disposed, "JSValue is disposed");
-    return ptr(this.cell);
+    return this.#address;
   }
 
-  dupCell(): Uint8Array {
-    const out = newCell();
-    this.vm.native.qjs_bun_dup_value(this.vm.ctx, this.ptr, out);
-    return out;
-  }
-
-  dump(options: JSDumpOptions = {}): unknown {
-    return this.vm.dump(this, options);
-  }
-
-  errorProperty(name: string): string | undefined {
-    return readErrorProperty(this, name);
-  }
-
-  thrownMessage(): string {
-    return thrownValueMessage(this);
+  get tag(): number {
+    return read.i32(this.ptr, 8);
   }
 
   get type(): JSValueType {
-    return valueType(this);
+    const code = this.vm.native.qjs_bun_type(this.vm.ctx, this.ptr);
+    if (code === -1) throw this.vm.getException();
+    const type = types[code];
+    if (type === undefined) throw new TypeError(`Unknown QuickJS value tag: ${this.tag}`);
+    return type;
   }
 
   get classId(): number {
     return this.vm.native.qjs_bun_get_class_id(this.ptr);
   }
 
-  get normTag(): number {
-    return this.vm.native.qjs_bun_value_get_norm_tag(this.ptr);
-  }
-
   get float64Value(): number {
-    return this.vm.native.qjs_bun_value_get_float64(this.ptr);
-  }
-
-  isNumber(): boolean {
-    return this.vm.native.qjs_bun_is_number(this.ptr) !== 0;
-  }
-
-  isBigInt(): boolean {
-    return this.vm.native.qjs_bun_is_bigint(this.vm.ctx, this.ptr) !== 0;
-  }
-
-  isBoolean(): boolean {
-    return this.vm.native.qjs_bun_is_bool(this.ptr) !== 0;
-  }
-
-  isNull(): boolean {
-    return this.vm.native.qjs_bun_is_null(this.ptr) !== 0;
-  }
-
-  isUndefined(): boolean {
-    return this.vm.native.qjs_bun_is_undefined(this.ptr) !== 0;
-  }
-
-  isException(): boolean {
-    return this.vm.native.qjs_bun_is_exception(this.ptr) !== 0;
-  }
-
-  isUninitialized(): boolean {
-    return this.vm.native.qjs_bun_is_uninitialized(this.ptr) !== 0;
-  }
-
-  isString(): boolean {
-    return this.vm.native.qjs_bun_is_string(this.ptr) !== 0;
-  }
-
-  isSymbol(): boolean {
-    return this.vm.native.qjs_bun_is_symbol(this.ptr) !== 0;
-  }
-
-  isObject(): boolean {
-    return this.vm.native.qjs_bun_is_object(this.ptr) !== 0;
-  }
-
-  isNaN(): boolean {
-    return this.vm.native.qjs_bun_value_is_nan(this.ptr) !== 0;
-  }
-
-  print(options: JSPrintOptions = {}): string {
-    const maxDepth = optionalUint32(options.maxDepth, "maxDepth");
-    const maxStringLength = optionalUint32(options.maxStringLength, "maxStringLength");
-    const maxItemCount = optionalUint32(options.maxItemCount, "maxItemCount");
-    const chunks: string[] = [];
-    const write = new JSCallback(
-      (_opaque: Pointer, text: Pointer, length: bigint) => {
-        chunks.push(length === 0n ? "" : String(new CString(text, 0, Number(length))));
-      },
-      {
-        args: ["ptr", "ptr", "u64"],
-        returns: "void",
-      },
-    );
-    assert(write.ptr !== null, "Print callback pointer is null");
-    try {
-      this.vm.native.qjs_bun_print_value_options(
-        this.vm.ctx,
-        write.ptr,
-        null,
-        this.ptr,
-        options.showHidden === undefined ? -1 : options.showHidden ? 1 : 0,
-        options.rawDump === undefined ? -1 : options.rawDump ? 1 : 0,
-        maxDepth,
-        maxStringLength,
-        maxItemCount,
-      );
-      return chunks.join("");
-    } finally {
-      write.close();
-    }
-  }
-
-  isLiveObject(): boolean {
-    return this.vm.native.qjs_bun_is_live_object(this.vm.runtime.ptr, this.ptr) !== 0;
-  }
-
-  setIsHTMLDDA(): void {
-    this.vm.native.qjs_bun_set_is_html_dda(this.vm.ctx, this.ptr);
-  }
-
-  getOpaque(classId: number): Pointer | null {
-    assert(
-      Number.isSafeInteger(classId) && classId >= 0,
-      "classId must be a non-negative safe integer",
-    );
-    return this.vm.native.qjs_bun_get_opaque(this.ptr, classId) as Pointer | null;
-  }
-
-  getOpaque2(classId: number): Pointer | null {
-    assert(
-      Number.isSafeInteger(classId) && classId >= 0,
-      "classId must be a non-negative safe integer",
-    );
-    const opaque = this.vm.native.qjs_bun_get_opaque2(
-      this.vm.ctx,
-      this.ptr,
-      classId,
-    ) as Pointer | null;
-    if (opaque === null && this.vm.hasException()) throw this.vm.getException();
-    return opaque;
-  }
-
-  getAnyOpaque(): JSOpaque | null {
-    const classId = new Uint32Array(1);
-    const opaque = this.vm.native.qjs_bun_get_any_opaque(this.ptr, classId) as Pointer | null;
-    return opaque === null ? null : { classId: classId[0]!, pointer: opaque };
-  }
-
-  setOpaque(opaque: Pointer | null): void {
-    this.vm.native.qjs_bun_set_opaque(this.ptr, opaque);
-  }
-
-  get promiseState(): QuickJSPromiseStateValue {
-    const state = this.vm.native.qjs_bun_promise_state(this.vm.ctx, this.ptr);
-    assert(
-      state === QuickJSPromiseState.NOT_PROMISE ||
-        state === QuickJSPromiseState.PENDING ||
-        state === QuickJSPromiseState.FULFILLED ||
-        state === QuickJSPromiseState.REJECTED,
-      `Unknown QuickJS promise state: ${state}`,
-    );
-    return state;
+    return read.f64(this.ptr);
   }
 
   get length(): number {
@@ -209,15 +78,153 @@ export class JSValue {
     return length.toNumber();
   }
 
+  get promiseState(): QuickJSPromiseStateValue {
+    const state = this.vm.native.qjs_bun_promise_state(this.vm.ctx, this.ptr);
+    assert(state >= -1 && state <= 2, `Unknown QuickJS promise state: ${state}`);
+    return state as QuickJSPromiseStateValue;
+  }
+
+  isNumber(): boolean {
+    const tag = this.tag;
+    return tag === QuickJSValueTag.INT || tag === QuickJSValueTag.FLOAT64;
+  }
+
+  isBigInt(): boolean {
+    const tag = this.tag;
+    return tag === QuickJSValueTag.BIG_INT || tag === QuickJSValueTag.SHORT_BIG_INT;
+  }
+
+  isBoolean(): boolean {
+    return this.tag === QuickJSValueTag.BOOL;
+  }
+
+  isNull(): boolean {
+    return this.tag === QuickJSValueTag.NULL;
+  }
+
+  isUndefined(): boolean {
+    return this.tag === QuickJSValueTag.UNDEFINED;
+  }
+
+  isException(): boolean {
+    return this.tag === QuickJSValueTag.EXCEPTION;
+  }
+
+  isUninitialized(): boolean {
+    return this.tag === QuickJSValueTag.UNINITIALIZED;
+  }
+
+  isString(): boolean {
+    const tag = this.tag;
+    return tag === QuickJSValueTag.STRING || tag === QuickJSValueTag.STRING_ROPE;
+  }
+
+  isSymbol(): boolean {
+    return this.tag === QuickJSValueTag.SYMBOL;
+  }
+
+  isObject(): boolean {
+    return this.tag === QuickJSValueTag.OBJECT;
+  }
+
+  isNaN(): boolean {
+    return this.tag === QuickJSValueTag.FLOAT64 && Number.isNaN(read.f64(this.ptr));
+  }
+
+  isLiveObject(): boolean {
+    return this.vm.native.qjs_bun_is_live_object(this.vm.runtime.ptr, this.ptr) !== 0;
+  }
+
+  isConstructor(): boolean {
+    return this.vm.native.qjs_bun_is_constructor(this.vm.ctx, this.ptr) !== 0;
+  }
+
+  isInstanceOf(constructor: JSValue): boolean {
+    this.vm.assertSameVM(constructor);
+    const ok = this.vm.native.qjs_bun_is_instance_of(this.vm.ctx, this.ptr, constructor.ptr);
+    if (ok < 0) throw this.vm.getException();
+    return ok !== 0;
+  }
+
+  ordinaryIsInstanceOf(constructor: JSValue): boolean {
+    this.vm.assertSameVM(constructor);
+    const ok = this.vm.native.qjs_bun_ordinary_is_instance_of(
+      this.vm.ctx,
+      this.ptr,
+      constructor.ptr,
+    );
+    if (ok < 0) throw this.vm.getException();
+    return ok !== 0;
+  }
+
+  print(options: JSPrintOptions = {}): string {
+    const uint32 = (value: number | undefined, name: string) => {
+      if (value === undefined) return 0xffffffff;
+      assert(
+        Number.isInteger(value) && value >= 0 && value < 0xffffffff,
+        `${name} must be a uint32`,
+      );
+      return value;
+    };
+    const length = new BigUint64Array(1);
+    const text = this.vm.native.qjs_bun_print(
+      this.vm.ctx,
+      this.ptr,
+      options.showHidden === undefined ? -1 : options.showHidden ? 1 : 0,
+      options.rawDump === undefined ? -1 : options.rawDump ? 1 : 0,
+      uint32(options.maxDepth, "maxDepth"),
+      uint32(options.maxStringLength, "maxStringLength"),
+      uint32(options.maxItemCount, "maxItemCount"),
+      length,
+    );
+    if (typeof text !== "number") return "";
+    try {
+      return new CString(text, 0, Number(length[0])) as string;
+    } finally {
+      this.vm.native.js_free(this.vm.ctx, text);
+    }
+  }
+
+  setIsHTMLDDA(): void {
+    this.vm.native.qjs_bun_set_is_html_dda(this.vm.ctx, this.ptr);
+  }
+
+  getOpaque(classId: number): Pointer | null {
+    const opaque = this.vm.native.qjs_bun_get_opaque(this.ptr, classId);
+    return typeof opaque === "number" ? opaque : null;
+  }
+
+  getOpaque2(classId: number): Pointer | null {
+    const opaque = this.vm.native.qjs_bun_get_opaque2(this.vm.ctx, this.ptr, classId);
+    if (typeof opaque === "number") return opaque;
+    if (this.vm.hasException()) throw this.vm.getException();
+    return null;
+  }
+
+  getAnyOpaque(): JSOpaque | null {
+    const classId = new Uint32Array(1);
+    const opaque = this.vm.native.qjs_bun_get_any_opaque(this.ptr, classId);
+    return typeof opaque === "number" ? { classId: classId[0]!, pointer: opaque } : null;
+  }
+
+  setOpaque(opaque: Pointer | number | null): void {
+    this.vm.native.qjs_bun_set_opaque(this.ptr, opaque as Pointer | null);
+  }
+
+  dump(options: JSDumpOptions = {}): unknown {
+    return this.vm.dump(this, options);
+  }
+
   dup(): JSValue {
-    const out = newCell();
-    this.vm.native.qjs_bun_dup_value(this.vm.ctx, this.ptr, out);
-    return new JSValue(this.vm, out, true);
+    const cell = new Uint8Array(16);
+    if (this.tag < 0) this.vm.native.qjs_bun_dup_value(this.vm.ctx, cell, this.ptr);
+    else cell.set(this.cell);
+    return new JSValue(this.vm, cell, true);
   }
 
   toAtom(): JSAtom {
     const atom = this.vm.native.qjs_bun_value_to_atom(this.vm.ctx, this.ptr);
-    assert(atom !== QuickJSAtom.NULL, "QuickJS atom did not initialize");
+    if (atom === QuickJSAtom.NULL) throw this.vm.getException();
     return new JSAtom(this.vm, atom, true);
   }
 
@@ -225,7 +232,7 @@ export class JSValue {
     return this.vm.callFunction(this, thisValue, ...args);
   }
 
-  invoke(name: string, ...args: JSValue[]): JSValue {
+  invoke(name: string | number | JSAtom, ...args: JSValue[]): JSValue {
     return this.vm.invoke(this, name, ...args);
   }
 
@@ -237,124 +244,173 @@ export class JSValue {
     return this.vm.callConstructorWithNewTarget(this, newTarget, ...args);
   }
 
-  getProp(name: string): JSValue {
-    const out = newCell();
-    using atom = this.vm.newAtom(name);
-    this.vm.native.qjs_bun_get_property(this.vm.ctx, this.ptr, atom.value, out);
+  getProp(key: string | number | JSAtom): JSValue {
+    const out = new Uint8Array(16);
+    this.vm.native.qjs_bun_get_property(this.vm.ctx, out, this.ptr, this.vm.atom(key));
     return this.vm.resultValue(out);
   }
 
-  getDataProp(name: string): JSValue {
-    const out = newCell();
-    using atom = this.vm.newAtom(name);
-    this.vm.native.qjs_bun_get_data_property(this.vm.ctx, this.ptr, atom.value, out);
+  getDataProp(key: string | number | JSAtom): JSValue {
+    const out = new Uint8Array(16);
+    this.vm.native.qjs_bun_get_data_property(this.vm.ctx, this.ptr, this.vm.atom(key), out);
     return this.vm.resultValue(out);
   }
 
-  getPropWithReceiver(name: string, receiver: JSValue, throwReferenceError = false): JSValue {
+  getPropWithReceiver(
+    key: string | number | JSAtom,
+    receiver: JSValue,
+    throwReferenceError = false,
+  ): JSValue {
     this.vm.assertSameVM(receiver);
-    const out = newCell();
-    using atom = this.vm.newAtom(name);
+    const out = new Uint8Array(16);
     this.vm.native.qjs_bun_get_property_internal(
       this.vm.ctx,
+      out,
       this.ptr,
-      atom.value,
+      this.vm.atom(key),
       receiver.ptr,
       throwReferenceError ? 1 : 0,
-      out,
     );
     return this.vm.resultValue(out);
   }
 
-  setProp(name: string, value: JSValue): void {
+  setProp(key: string | number | JSAtom, value: JSValue): void {
     this.vm.assertSameVM(value);
-    using atom = this.vm.newAtom(name);
-    const ownedValue = value.dupCell();
     const ok = this.vm.native.qjs_bun_set_property(
       this.vm.ctx,
       this.ptr,
-      atom.value,
-      ptr(ownedValue),
+      this.vm.atom(key),
+      value.ptr,
     );
     if (ok < 0) throw this.vm.getException();
   }
 
-  setPropWithReceiver(name: string, value: JSValue, receiver: JSValue, flags = 0): void {
+  setPropWithReceiver(
+    key: string | number | JSAtom,
+    value: JSValue,
+    receiver: JSValue,
+    flags = 0,
+  ): void {
     this.vm.assertSameVM(value, receiver);
-    using atom = this.vm.newAtom(name);
-    const ownedValue = value.dupCell();
     const ok = this.vm.native.qjs_bun_set_property_internal(
       this.vm.ctx,
       this.ptr,
-      atom.value,
-      ptr(ownedValue),
+      this.vm.atom(key),
+      value.ptr,
       receiver.ptr,
       flags,
     );
     if (ok < 0) throw this.vm.getException();
   }
 
-  defineProp(name: string, value: JSValue, flags = QuickJSPropertyFlags.C_W_E): void {
+  defineProp(
+    key: string | number | JSAtom,
+    value: JSValue,
+    flags: number = QuickJSPropertyFlags.C_W_E,
+  ): void {
     this.vm.assertSameVM(value);
-    using atom = this.vm.newAtom(name);
-    const ownedValue = value.dupCell();
     const ok = this.vm.native.qjs_bun_define_property_value(
       this.vm.ctx,
       this.ptr,
-      atom.value,
-      ptr(ownedValue),
+      this.vm.atom(key),
+      value.ptr,
       flags,
     );
     if (ok < 0) throw this.vm.getException();
   }
 
-  defineProps(values: Record<string, HostValue>, flags = QuickJSPropertyFlags.C_W_E): void {
+  defineProps(values: Record<string, HostValue>, flags: number = QuickJSPropertyFlags.C_W_E): void {
     for (const [name, value] of Object.entries(values)) {
       using handle = this.vm.newValue(value);
       this.defineProp(name, handle, flags);
     }
   }
 
-  definePropGetSet(name: string, getter: JSValue, setter: JSValue, flags = 0): void {
+  definePropGetSet(
+    key: string | number | JSAtom,
+    getter: JSValue,
+    setter: JSValue,
+    flags = 0,
+  ): void {
     this.vm.assertSameVM(getter, setter);
-    using atom = this.vm.newAtom(name);
-    const ownedGetter = getter.dupCell();
-    const ownedSetter = setter.dupCell();
     const ok = this.vm.native.qjs_bun_define_property_get_set(
       this.vm.ctx,
       this.ptr,
-      atom.value,
-      ptr(ownedGetter),
-      ptr(ownedSetter),
+      this.vm.atom(key),
+      getter.ptr,
+      setter.ptr,
       flags,
     );
     if (ok < 0) throw this.vm.getException();
   }
 
-  hasProp(name: string): boolean {
-    using atom = this.vm.newAtom(name);
-    const ok = this.vm.native.qjs_bun_has_property(this.vm.ctx, this.ptr, atom.value);
+  defineProperty(key: string | number | JSAtom, definition: JSPropertyDefinition): void {
+    const value = definition.value ?? this.vm.undefined;
+    const getter = definition.get ?? this.vm.undefined;
+    const setter = definition.set ?? this.vm.undefined;
+    this.vm.assertSameVM(value, getter, setter);
+    let flags = definition.flags ?? 0;
+    if (definition.value !== undefined) flags |= QuickJSPropertyFlags.HAS_VALUE;
+    if (definition.get !== undefined) flags |= QuickJSPropertyFlags.HAS_GET;
+    if (definition.set !== undefined) flags |= QuickJSPropertyFlags.HAS_SET;
+    const ok = this.vm.native.qjs_bun_define_property(
+      this.vm.ctx,
+      this.ptr,
+      this.vm.atom(key),
+      value.ptr,
+      getter.ptr,
+      setter.ptr,
+      flags,
+    );
+    if (ok < 0) throw this.vm.getException();
+  }
+
+  getOwnPropertyDescriptor(key: string | number | JSAtom): JSPropertyDescriptor | undefined {
+    const descriptor = new Uint8Array(56);
+    const ok = this.vm.native.qjs_bun_get_own_property(
+      this.vm.ctx,
+      descriptor,
+      this.ptr,
+      this.vm.atom(key),
+    );
+    if (ok < 0) throw this.vm.getException();
+    if (ok === 0) return undefined;
+    return {
+      flags: read.i32(ptr(descriptor)),
+      value: new JSValue(this.vm, descriptor.slice(8, 24), true),
+      get: new JSValue(this.vm, descriptor.slice(24, 40), true),
+      set: new JSValue(this.vm, descriptor.slice(40, 56), true),
+    };
+  }
+
+  hasProp(key: string | number | JSAtom): boolean {
+    const ok = this.vm.native.qjs_bun_has_property(this.vm.ctx, this.ptr, this.vm.atom(key));
     if (ok < 0) throw this.vm.getException();
     return ok !== 0;
   }
 
-  deleteProp(name: string, flags = 0): boolean {
-    using atom = this.vm.newAtom(name);
-    const ok = this.vm.native.qjs_bun_delete_property(this.vm.ctx, this.ptr, atom.value, flags);
+  deleteProp(key: string | number | JSAtom, flags = 0): boolean {
+    const ok = this.vm.native.qjs_bun_delete_property(
+      this.vm.ctx,
+      this.ptr,
+      this.vm.atom(key),
+      flags,
+    );
     if (ok < 0) throw this.vm.getException();
     return ok !== 0;
   }
 
   getPrototype(): JSValue {
-    const out = newCell();
-    this.vm.native.qjs_bun_get_prototype(this.vm.ctx, this.ptr, out);
+    const out = new Uint8Array(16);
+    this.vm.native.qjs_bun_get_prototype(this.vm.ctx, out, this.ptr);
     return this.vm.resultValue(out);
   }
 
   setPrototype(prototype: JSValue): void {
     this.vm.assertSameVM(prototype);
-    const ok = this.vm.native.qjs_bun_set_prototype(this.vm.ctx, this.ptr, prototype.ptr);
-    if (ok < 0) throw this.vm.getException();
+    if (this.vm.native.qjs_bun_set_prototype(this.vm.ctx, this.ptr, prototype.ptr) < 0) {
+      throw this.vm.getException();
+    }
   }
 
   setConstructorBit(constructor = true): void {
@@ -368,8 +424,9 @@ export class JSValue {
 
   setConstructor(prototype: JSValue): void {
     this.vm.assertSameVM(prototype);
-    const ok = this.vm.native.qjs_bun_set_constructor(this.vm.ctx, this.ptr, prototype.ptr);
-    if (ok < 0) throw this.vm.getException();
+    if (this.vm.native.qjs_bun_set_constructor(this.vm.ctx, this.ptr, prototype.ptr) < 0) {
+      throw this.vm.getException();
+    }
   }
 
   isExtensible(): boolean {
@@ -380,17 +437,6 @@ export class JSValue {
 
   preventExtensions(): boolean {
     const ok = this.vm.native.qjs_bun_prevent_extensions(this.vm.ctx, this.ptr);
-    if (ok < 0) throw this.vm.getException();
-    return ok !== 0;
-  }
-
-  isConstructor(): boolean {
-    return this.vm.native.qjs_bun_is_constructor(this.vm.ctx, this.ptr) !== 0;
-  }
-
-  isInstanceOf(constructor: JSValue): boolean {
-    this.vm.assertSameVM(constructor);
-    const ok = this.vm.native.qjs_bun_is_instance_of(this.vm.ctx, this.ptr, constructor.ptr);
     if (ok < 0) throw this.vm.getException();
     return ok !== 0;
   }
@@ -411,190 +457,254 @@ export class JSValue {
   }
 
   coerceToString(): JSValue {
-    const out = newCell();
-    this.vm.native.qjs_bun_to_string(this.vm.ctx, this.ptr, out);
+    const out = new Uint8Array(16);
+    this.vm.native.qjs_bun_to_string(this.vm.ctx, out, this.ptr);
+    return this.vm.resultValue(out);
+  }
+
+  coerceToObject(): JSValue {
+    const out = new Uint8Array(16);
+    this.vm.native.qjs_bun_to_object(this.vm.ctx, out, this.ptr);
+    return this.vm.resultValue(out);
+  }
+
+  coerceToPrimitive(hint: number = QuickJSPrimitiveHint.NONE): JSValue {
+    const out = new Uint8Array(16);
+    this.vm.native.qjs_bun_to_primitive(this.vm.ctx, out, this.ptr, hint);
     return this.vm.resultValue(out);
   }
 
   toPropertyKey(): JSValue {
-    const out = newCell();
-    this.vm.native.qjs_bun_to_property_key(this.vm.ctx, this.ptr, out);
+    const out = new Uint8Array(16);
+    this.vm.native.qjs_bun_to_property_key(this.vm.ctx, out, this.ptr);
     return this.vm.resultValue(out);
+  }
+
+  coerceToBoolean(): boolean {
+    const ok = this.vm.native.qjs_bun_to_bool(this.vm.ctx, this.ptr);
+    if (ok < 0) throw this.vm.getException();
+    return ok !== 0;
+  }
+
+  coerceToNumber(): number {
+    const out = new Float64Array(1);
+    if (this.vm.native.qjs_bun_to_float64(this.vm.ctx, out, this.ptr) < 0) {
+      throw this.vm.getException();
+    }
+    return out[0]!;
+  }
+
+  coerceToInt32(): number {
+    const out = new Int32Array(1);
+    if (this.vm.native.qjs_bun_to_int32(this.vm.ctx, out, this.ptr) < 0) {
+      throw this.vm.getException();
+    }
+    return out[0]!;
+  }
+
+  coerceToInt32Saturated(): number {
+    const out = new Int32Array(1);
+    if (this.vm.native.qjs_bun_to_int32_sat(this.vm.ctx, out, this.ptr) < 0) {
+      throw this.vm.getException();
+    }
+    return out[0]!;
+  }
+
+  coerceToUint32(): number {
+    const out = new Uint32Array(1);
+    if (this.vm.native.qjs_bun_to_uint32(this.vm.ctx, out, this.ptr) < 0) {
+      throw this.vm.getException();
+    }
+    return out[0]!;
+  }
+
+  coerceToInt64(): bigint {
+    const out = new BigInt64Array(1);
+    if (this.vm.native.qjs_bun_to_int64(this.vm.ctx, out, this.ptr) < 0) {
+      throw this.vm.getException();
+    }
+    return out[0]!;
+  }
+
+  coerceToInt64Ext(): bigint {
+    const out = new BigInt64Array(1);
+    if (this.vm.native.qjs_bun_to_int64_ext(this.vm.ctx, out, this.ptr) < 0) {
+      throw this.vm.getException();
+    }
+    return out[0]!;
+  }
+
+  coerceToIndex(): bigint {
+    const out = new BigUint64Array(1);
+    if (this.vm.native.qjs_bun_to_index(this.vm.ctx, out, this.ptr) < 0) {
+      throw this.vm.getException();
+    }
+    return out[0]!;
+  }
+
+  coerceToBigInt64(): bigint {
+    const out = new BigInt64Array(1);
+    if (this.vm.native.qjs_bun_to_bigint64(this.vm.ctx, out, this.ptr) < 0) {
+      throw this.vm.getException();
+    }
+    return out[0]!;
   }
 
   typedArrayBuffer(): JSValue {
-    const out = newCell();
-    this.vm.native.qjs_bun_get_typed_array_buffer(this.vm.ctx, this.ptr, null, null, null, out);
-    return this.vm.resultValue(out);
+    return this.typedArrayInfo().buffer;
   }
 
   typedArrayInfo(): JSTypedArrayInfo {
-    const byteOffset = new BigUint64Array(1);
-    const byteLength = new BigUint64Array(1);
-    const bytesPerElement = new BigUint64Array(1);
-    const out = newCell();
+    const info = new BigUint64Array(3);
+    const out = new Uint8Array(16);
     this.vm.native.qjs_bun_get_typed_array_buffer(
       this.vm.ctx,
-      this.ptr,
-      byteOffset,
-      byteLength,
-      bytesPerElement,
       out,
+      this.ptr,
+      info.subarray(0, 1),
+      info.subarray(1, 2),
+      info.subarray(2, 3),
     );
     return {
       buffer: this.vm.resultValue(out),
-      byteOffset: Number(byteOffset[0]!),
-      byteLength: Number(byteLength[0]!),
-      bytesPerElement: Number(bytesPerElement[0]!),
+      byteOffset: Number(info[0]!),
+      byteLength: Number(info[1]!),
+      bytesPerElement: Number(info[2]!),
     };
   }
 
   writeObject(flags = 0): Uint8Array {
-    const size = new Uint8Array(8);
-    const bytes = this.vm.native.qjs_bun_write_object(this.vm.ctx, size, this.ptr, flags);
-    if (bytes === null) throw this.vm.getException();
+    const size = new BigUint64Array(1);
+    const data = this.vm.native.qjs_bun_write_object(this.vm.ctx, size, this.ptr, flags);
+    if (typeof data !== "number") throw this.vm.getException();
     try {
-      return new Uint8Array(toArrayBuffer(bytes, 0, Number(read.u64(ptr(size))))).slice();
+      return new Uint8Array(toArrayBuffer(data, 0, Number(size[0]!))).slice();
     } finally {
-      this.vm.native.js_free(this.vm.ctx, bytes);
+      this.vm.native.js_free(this.vm.ctx, data);
     }
+  }
+
+  arrayBufferBytes(): Uint8Array {
+    const size = new BigUint64Array(1);
+    const data = this.vm.native.qjs_bun_get_array_buffer(this.vm.ctx, size, this.ptr);
+    if (typeof data !== "number") throw this.vm.getException();
+    return new Uint8Array(toArrayBuffer(data, 0, Number(size[0]!))).slice();
   }
 
   detachArrayBuffer(): void {
     this.vm.native.qjs_bun_detach_array_buffer(this.vm.ctx, this.ptr);
   }
 
-  arrayBufferBytes(): Uint8Array {
-    const size = new Uint8Array(8);
-    const data = this.vm.native.qjs_bun_get_array_buffer(this.vm.ctx, size, this.ptr);
-    if (data === null) throw this.vm.getException();
-    return new Uint8Array(toArrayBuffer(data, 0, Number(read.u64(ptr(size))))).slice();
-  }
-
-  coerceToBoolean(): boolean {
-    return this.vm.native.qjs_bun_to_bool(this.vm.ctx, this.ptr) !== 0;
-  }
-
-  coerceToNumber(): number {
-    const out = new Float64Array(1);
-    if (this.vm.native.qjs_bun_to_float64(this.vm.ctx, out, this.ptr) < 0)
-      throw this.vm.getException();
-    return out[0]!;
-  }
-
-  coerceToInt32(): number {
-    const out = new Int32Array(1);
-    if (this.vm.native.qjs_bun_to_int32(this.vm.ctx, out, this.ptr) < 0)
-      throw this.vm.getException();
-    return out[0]!;
-  }
-
-  coerceToUint32(): number {
-    const out = new Uint32Array(1);
-    if (this.vm.native.qjs_bun_to_uint32(this.vm.ctx, out, this.ptr) < 0)
-      throw this.vm.getException();
-    return out[0]!;
-  }
-
-  coerceToInt64(): bigint {
-    const out = new BigInt64Array(1);
-    if (this.vm.native.qjs_bun_to_int64(this.vm.ctx, out, this.ptr) < 0)
-      throw this.vm.getException();
-    return out[0]!;
-  }
-
-  coerceToInt64Ext(): bigint {
-    const out = new BigInt64Array(1);
-    if (this.vm.native.qjs_bun_to_int64_ext(this.vm.ctx, out, this.ptr) < 0)
-      throw this.vm.getException();
-    return out[0]!;
-  }
-
-  coerceToIndex(): bigint {
-    const out = new BigUint64Array(1);
-    if (this.vm.native.qjs_bun_to_index(this.vm.ctx, out, this.ptr) < 0)
-      throw this.vm.getException();
-    return out[0]!;
-  }
-
-  coerceToBigInt64(): bigint {
-    const out = new BigInt64Array(1);
-    if (this.vm.native.qjs_bun_to_bigint64(this.vm.ctx, out, this.ptr) < 0)
-      throw this.vm.getException();
-    return out[0]!;
-  }
-
   getIndex(index: number): JSValue {
-    const out = newCell();
-    this.vm.native.qjs_bun_get_property_u32(this.vm.ctx, this.ptr, index, out);
+    const out = new Uint8Array(16);
+    this.vm.native.qjs_bun_get_property_u32(this.vm.ctx, out, this.ptr, index);
     return this.vm.resultValue(out);
   }
 
   setIndex(index: number, value: JSValue): void {
     this.vm.assertSameVM(value);
-    const ownedValue = value.dupCell();
-    const ok = this.vm.native.qjs_bun_set_property_u32(
-      this.vm.ctx,
-      this.ptr,
-      index,
-      ptr(ownedValue),
-    );
-    if (ok < 0) throw this.vm.getException();
+    if (this.vm.native.qjs_bun_set_property_u32(this.vm.ctx, this.ptr, index, value.ptr) < 0) {
+      throw this.vm.getException();
+    }
   }
 
   setIndex64(index: number | bigint, value: JSValue): void {
     this.vm.assertSameVM(value);
-    const ownedValue = value.dupCell();
     const ok = this.vm.native.qjs_bun_set_property_i64(
       this.vm.ctx,
       this.ptr,
       BigInt(index),
-      ptr(ownedValue),
+      value.ptr,
     );
     if (ok < 0) throw this.vm.getException();
   }
 
-  defineIndex(index: number, value: JSValue, flags = QuickJSPropertyFlags.C_W_E): void {
+  defineIndex(index: number, value: JSValue, flags: number = QuickJSPropertyFlags.C_W_E): void {
     this.vm.assertSameVM(value);
-    const ownedValue = value.dupCell();
     const ok = this.vm.native.qjs_bun_define_property_value_u32(
       this.vm.ctx,
       this.ptr,
       index,
-      ptr(ownedValue),
+      value.ptr,
       flags,
     );
     if (ok < 0) throw this.vm.getException();
   }
 
-  keys(): string[] {
-    const tabCell = new Uint8Array(8);
-    const lengthCell = new Uint8Array(4);
+  keys(
+    flags: number = QuickJSGetOwnPropertyNamesFlags.STRING_MASK |
+      QuickJSGetOwnPropertyNamesFlags.ENUM_ONLY,
+  ): string[] {
+    const { vm } = this;
+    let { scratch } = vm;
+    let count = Number(
+      vm.native.qjs_bun_own_keys(vm.ctx, this.ptr, flags, scratch, scratch.byteLength),
+    );
+    if (count < -1) {
+      scratch = vm.scratch = Buffer.allocUnsafe(-count * 2);
+      count = Number(
+        vm.native.qjs_bun_own_keys(vm.ctx, this.ptr, flags, scratch, scratch.byteLength),
+      );
+    }
+    if (count < 0) throw vm.getException();
+    const keys: string[] = [];
+    let offset = 0;
+    for (let index = 0; index < count; index++) {
+      const length = scratch.readUInt32LE(offset);
+      keys.push(scratch.toString("utf8", offset + 4, offset + 4 + length));
+      offset += 4 + length;
+    }
+    return keys;
+  }
+
+  ownAtoms(
+    flags: number = QuickJSGetOwnPropertyNamesFlags.STRING_MASK |
+      QuickJSGetOwnPropertyNamesFlags.SYMBOL_MASK,
+  ): JSAtom[] {
+    const table = new BigUint64Array(1);
+    const count = new Uint32Array(1);
     const ok = this.vm.native.qjs_bun_get_own_property_names(
       this.vm.ctx,
-      tabCell,
-      lengthCell,
+      table,
+      count,
       this.ptr,
-      QuickJSGetOwnPropertyNamesFlags.STRING_MASK | QuickJSGetOwnPropertyNamesFlags.ENUM_ONLY,
+      flags,
     );
     if (ok < 0) throw this.vm.getException();
-    const tab = read.ptr(ptr(tabCell)) as Pointer | null;
-    const length = read.u32(ptr(lengthCell));
+    const entries = Number(table[0]!) as Pointer;
+    const atoms: JSAtom[] = [];
+    for (let index = 0; index < count[0]!; index++) {
+      const atom = read.u32(entries, index * 8 + 4);
+      atoms.push(new JSAtom(this.vm, this.vm.native.JS_DupAtom(this.vm.ctx, atom), true));
+    }
+    this.vm.native.JS_FreePropertyEnum(this.vm.ctx, entries, count[0]!);
+    return atoms;
+  }
+
+  *[Symbol.iterator](): Generator<JSValue, void, undefined> {
+    const { vm } = this;
+    const out = new Uint8Array(16);
+    vm.native.qjs_bun_get_iterator(vm.ctx, out, this.ptr, 0);
+    using iterator = vm.resultValue(out);
+    using next = iterator.getProp("next");
+    const done = new Int32Array(1);
+    let finished = false;
     try {
-      const keys: string[] = [];
-      if (length > 0) {
-        assert(tab !== null, "QuickJS property table is null");
-        for (let index = 0; index < length; index++) {
-          const atom = read.u32(tab, index * 8 + 4);
-          const size = new Uint8Array(8);
-          const keyPtr = this.vm.native.JS_AtomToCStringLen(this.vm.ctx, ptr(size), atom);
-          assert(keyPtr !== null, "QuickJS property key is null");
-          keys.push(readCString(this.vm, keyPtr, Number(read.u64(ptr(size)))));
+      for (;;) {
+        const cell = new Uint8Array(16);
+        vm.native.qjs_bun_iterator_next(vm.ctx, cell, iterator.ptr, next.ptr, done);
+        const value = vm.resultValue(cell);
+        if (done[0] !== 0) {
+          finished = true;
+          value.dispose();
+          return;
         }
+        yield value;
       }
-      return keys;
     } finally {
-      if (tab !== null) this.vm.native.JS_FreePropertyEnum(this.vm.ctx, tab, length);
+      if (!finished && vm.native.qjs_bun_iterator_close(vm.ctx, iterator.ptr, 0) < 0) {
+        vm.getException().dispose();
+      }
     }
   }
 
@@ -602,48 +712,183 @@ export class JSValue {
     const state = this.promiseState;
     assert(state !== QuickJSPromiseState.NOT_PROMISE, "QuickJS value is not a promise");
     assert(state !== QuickJSPromiseState.PENDING, "QuickJS promise is pending");
-    const out = newCell();
-    this.vm.native.qjs_bun_promise_result(this.vm.ctx, this.ptr, out);
+    const out = new Uint8Array(16);
+    this.vm.native.qjs_bun_promise_result(this.vm.ctx, out, this.ptr);
     return new JSValue(this.vm, out, true);
   }
 
+  errorProperty(name: string): string | undefined {
+    using value = this.getDataProp(name);
+    return value.isUndefined() ? undefined : value.#primitive();
+  }
+
+  thrownMessage(): string {
+    switch (this.type) {
+      case "error":
+        return this.errorProperty("message") ?? "Error";
+      case "symbol":
+        return "QuickJS symbol was thrown";
+      case "function":
+        return "QuickJS function was thrown";
+      case "array":
+        return "QuickJS array was thrown";
+      case "object":
+        return "QuickJS object was thrown";
+      default:
+        return this.#primitive()!;
+    }
+  }
+
   toBoolean(): boolean {
-    const type = this.type;
-    assert(type === "boolean", `Cannot convert QuickJS ${type} to boolean`);
+    if (this.tag !== QuickJSValueTag.BOOL) {
+      throw new TypeError(`Cannot convert QuickJS ${this.type} to boolean`);
+    }
     return read.i32(this.ptr) !== 0;
   }
 
   toNumber(): number {
-    const type = this.type;
-    assert(type === "number", `Cannot convert QuickJS ${type} to number`);
-    return valueTag(this.ptr) === QuickJSValueTag.INT ? read.i32(this.ptr) : read.f64(this.ptr);
+    const tag = this.tag;
+    if (tag === QuickJSValueTag.INT) return read.i32(this.ptr);
+    if (tag === QuickJSValueTag.FLOAT64) return read.f64(this.ptr);
+    throw new TypeError(`Cannot convert QuickJS ${this.type} to number`);
   }
 
   toBigInt(): bigint {
-    const type = this.type;
-    assert(type === "bigint", `Cannot convert QuickJS ${type} to bigint`);
-    return BigInt(valueCString(this));
+    if (!this.isBigInt()) throw new TypeError(`Cannot convert QuickJS ${this.type} to bigint`);
+    const parts = new BigUint64Array(2);
+    const status = this.vm.native.qjs_bun_to_bigint128(
+      this.vm.ctx,
+      parts.subarray(0, 1),
+      parts.subarray(1, 2),
+      this.ptr,
+    );
+    if (status < 0) throw this.vm.getException();
+    if (status === 0) return BigInt.asIntN(128, (parts[1]! << 64n) | parts[0]!);
+    return BigInt(this.#text());
   }
 
   toString(): string {
-    const type = this.type;
-    assert(type === "string", `Cannot convert QuickJS ${type} to string`);
-    return valueCString(this);
+    if (!this.isString()) throw new TypeError(`Cannot convert QuickJS ${this.type} to string`);
+    return this.#text();
   }
 
   toError(): Error {
     const type = this.type;
-    assert(type === "error", `Cannot convert QuickJS ${type} to error`);
-    const error = new Error(readErrorProperty(this, "message") ?? "Error");
-    error.name = readErrorProperty(this, "name") ?? "Error";
-    error.stack = readErrorProperty(this, "stack") ?? error.stack;
+    if (type !== "error") throw new TypeError(`Cannot convert QuickJS ${type} to error`);
+    const error = new Error(this.errorProperty("message") ?? "Error");
+    error.name = this.errorProperty("name") ?? "Error";
+    error.stack = this.errorProperty("stack") ?? error.stack;
     return error;
+  }
+
+  toDate(): Date {
+    const out = new Float64Array(1);
+    if (this.vm.native.qjs_bun_date_value(this.vm.ctx, out, this.ptr) < 0) {
+      throw this.vm.getException();
+    }
+    return new Date(out[0]!);
   }
 
   dispose(): void {
     if (!this.owned || this.#disposed) return;
-    this.vm.native.qjs_bun_free_value(this.vm.ctx, ptr(this.cell));
+    const refcounted = this.tag < 0;
     this.#disposed = true;
+    if (refcounted && !this.vm.disposed) {
+      this.vm.native.qjs_bun_free_value(this.vm.ctx, this.#address);
+    }
+  }
+
+  [Symbol.dispose](): void {
+    this.dispose();
+  }
+
+  #text(): string {
+    const { vm } = this;
+    let { scratch } = vm;
+    let length = Number(
+      vm.native.qjs_bun_to_cstring_copy(vm.ctx, this.ptr, scratch, scratch.byteLength),
+    );
+    if (length > scratch.byteLength) {
+      scratch = vm.scratch = Buffer.allocUnsafe(length * 2);
+      length = Number(
+        vm.native.qjs_bun_to_cstring_copy(vm.ctx, this.ptr, scratch, scratch.byteLength),
+      );
+    }
+    if (length < 0) throw vm.getException();
+    return scratch.toString("utf8", 0, length);
+  }
+
+  #primitive(): string | undefined {
+    switch (this.tag) {
+      case QuickJSValueTag.UNDEFINED:
+        return "undefined";
+      case QuickJSValueTag.NULL:
+        return "null";
+      case QuickJSValueTag.BOOL:
+        return String(this.toBoolean());
+      case QuickJSValueTag.INT:
+      case QuickJSValueTag.FLOAT64:
+        return String(this.toNumber());
+      case QuickJSValueTag.BIG_INT:
+      case QuickJSValueTag.SHORT_BIG_INT:
+        return String(this.toBigInt());
+      case QuickJSValueTag.STRING:
+      case QuickJSValueTag.STRING_ROPE:
+        return this.#text();
+      default:
+        return undefined;
+    }
+  }
+}
+
+export class JSAtom {
+  #disposed = false;
+
+  constructor(
+    readonly vm: JSContext,
+    readonly value: number,
+    readonly owned: boolean,
+  ) {}
+
+  dup(): JSAtom {
+    assert(!this.#disposed, "QuickJS atom is disposed");
+    if ((this.value & QuickJSAtom.TAG_INT) !== 0) return new JSAtom(this.vm, this.value, false);
+    return new JSAtom(this.vm, this.vm.native.JS_DupAtom(this.vm.ctx, this.value), true);
+  }
+
+  toValue(): JSValue {
+    assert(!this.#disposed, "QuickJS atom is disposed");
+    const out = new Uint8Array(16);
+    this.vm.native.qjs_bun_atom_to_value(this.vm.ctx, out, this.value);
+    return this.vm.resultValue(out);
+  }
+
+  toStringValue(): JSValue {
+    assert(!this.#disposed, "QuickJS atom is disposed");
+    const out = new Uint8Array(16);
+    this.vm.native.qjs_bun_atom_to_string(this.vm.ctx, out, this.value);
+    return this.vm.resultValue(out);
+  }
+
+  toString(): string {
+    assert(!this.#disposed, "QuickJS atom is disposed");
+    if ((this.value & QuickJSAtom.TAG_INT) !== 0) return String(this.value & QuickJSAtom.MAX_INT);
+    const size = new BigUint64Array(1);
+    const text = this.vm.native.JS_AtomToCStringLen(this.vm.ctx, size, this.value);
+    assert(typeof text === "number", "QuickJS atom string is null");
+    try {
+      return new CString(text, 0, Number(size[0]!)) as string;
+    } finally {
+      this.vm.native.JS_FreeCString(this.vm.ctx, text);
+    }
+  }
+
+  dispose(): void {
+    if (!this.owned || this.#disposed) return;
+    this.#disposed = true;
+    if ((this.value & QuickJSAtom.TAG_INT) === 0 && !this.vm.disposed) {
+      this.vm.native.JS_FreeAtom(this.vm.ctx, this.value);
+    }
   }
 
   [Symbol.dispose](): void {
@@ -651,184 +896,118 @@ export class JSValue {
   }
 }
 
-function readErrorProperty(handle: JSValue, name: string): string | undefined {
-  const out = newCell();
-  using atom = handle.vm.newAtom(name);
-  handle.vm.native.qjs_bun_get_data_property(handle.vm.ctx, handle.ptr, atom.value, out);
-  using value = handle.vm.resultValue(out);
-  if (value.type === "undefined") return undefined;
-  return primitiveString(value) ?? undefined;
-}
+export class JSModule {
+  constructor(
+    readonly vm: JSContext,
+    readonly ptr: Pointer,
+  ) {}
 
-interface DumpBudget {
-  maxDepth: number;
-  maxNodes: number;
-  nodes: number;
-}
-
-export function dumpHandle(handle: JSValue, options: JSDumpOptions = {}): unknown {
-  const maxDepth = options.maxDepth ?? MAX_VALUE_DEPTH;
-  const maxNodes = options.maxNodes ?? MAX_DUMP_NODES;
-  assert(
-    Number.isSafeInteger(maxDepth) && maxDepth > 0,
-    "maxDepth must be a positive safe integer",
-  );
-  assert(
-    Number.isSafeInteger(maxNodes) && maxNodes > 0,
-    "maxNodes must be a positive safe integer",
-  );
-  return dumpValue(handle, new Map(), 0, { maxDepth, maxNodes, nodes: 0 });
-}
-
-function dumpValue(
-  handle: JSValue,
-  seen: Map<Pointer, unknown>,
-  depth: number,
-  budget: DumpBudget,
-): unknown {
-  if (depth > budget.maxDepth) {
-    throw new RangeError(`QuickJS dump exceeded maximum depth of ${budget.maxDepth}`);
-  }
-  if (++budget.nodes > budget.maxNodes) {
-    throw new RangeError(`QuickJS dump exceeded maximum of ${budget.maxNodes} values`);
-  }
-  const type = handle.type;
-  switch (type) {
-    case "undefined":
-      return undefined;
-    case "null":
-      return null;
-    case "boolean":
-      return handle.toBoolean();
-    case "number":
-      return handle.toNumber();
-    case "bigint":
-      return handle.toBigInt();
-    case "string":
-      return handle.toString();
-    case "array":
-    case "object": {
-      const pointer = read.ptr(handle.ptr) as Pointer;
-      assert(pointer !== null, "QuickJS object pointer is null");
-      const existing = seen.get(pointer);
-      if (existing !== undefined) return existing;
-      if (type === "object") {
-        const object: Record<string, unknown> = {};
-        seen.set(pointer, object);
-        for (const key of handle.keys()) {
-          using value = handle.getProp(key);
-          Object.defineProperty(object, key, {
-            value: dumpValue(value, seen, depth + 1, budget),
-            enumerable: true,
-            configurable: true,
-            writable: true,
-          });
-        }
-        return object;
-      }
-      const array: unknown[] = [];
-      seen.set(pointer, array);
-      const length = handle.length;
-      for (let index = 0; index < length; index++) {
-        using entry = handle.getIndex(index);
-        array.push(dumpValue(entry, seen, depth + 1, budget));
-      }
-      return array;
+  addExport(name: string): void {
+    if (this.vm.native.JS_AddModuleExport(this.vm.ctx, this.ptr, cstring(name)) < 0) {
+      throw this.vm.getException();
     }
-    case "error":
-      return handle.toError();
-    case "function":
-    case "symbol":
-      throw new TypeError(`Cannot dump QuickJS ${type}`);
-    default: {
-      const neverType: any = type;
-      throw new TypeError(`Cannot dump QuickJS ${neverType}`);
+  }
+
+  addExports(names: readonly string[]): void {
+    for (const name of names) this.addExport(name);
+  }
+
+  setExport(name: string, value: JSValue): void {
+    this.vm.assertSameVM(value);
+    const ok = this.vm.native.qjs_bun_set_module_export(
+      this.vm.ctx,
+      this.ptr,
+      cstring(name),
+      value.ptr,
+    );
+    if (ok < 0) throw this.vm.getException();
+  }
+
+  setExports(values: Record<string, HostValue>): void {
+    for (const [name, value] of Object.entries(values)) {
+      using handle = this.vm.newValue(value);
+      this.setExport(name, handle);
+    }
+  }
+
+  getNameAtom(): JSAtom {
+    const atom = this.vm.native.JS_GetModuleName(this.vm.ctx, this.ptr);
+    assert(atom !== QuickJSAtom.NULL, "JS_GetModuleName returned null");
+    return new JSAtom(this.vm, atom, true);
+  }
+
+  getImportMeta(): JSValue {
+    const out = new Uint8Array(16);
+    this.vm.native.qjs_bun_get_import_meta(this.vm.ctx, out, this.ptr);
+    return this.vm.resultValue(out);
+  }
+
+  getNamespace(): JSValue {
+    const out = new Uint8Array(16);
+    this.vm.native.qjs_bun_get_module_namespace(this.vm.ctx, out, this.ptr);
+    return this.vm.resultValue(out);
+  }
+
+  getPrivateValue(): JSValue {
+    const out = new Uint8Array(16);
+    this.vm.native.qjs_bun_get_module_private_value(this.vm.ctx, out, this.ptr);
+    return this.vm.resultValue(out);
+  }
+
+  setPrivateValue(value: JSValue): void {
+    this.vm.assertSameVM(value);
+    if (this.vm.native.qjs_bun_set_module_private_value(this.vm.ctx, this.ptr, value.ptr) < 0) {
+      throw this.vm.getException();
     }
   }
 }
 
-function thrownValueMessage(handle: JSValue): string {
-  switch (handle.type) {
-    case "undefined":
-    case "null":
-    case "boolean":
-    case "number":
-    case "bigint":
-    case "string":
-      return primitiveString(handle)!;
-    case "symbol":
-      return "QuickJS symbol was thrown";
-    case "function":
-      return "QuickJS function was thrown";
-    case "array":
-      return "QuickJS array was thrown";
-    case "object":
-      return "QuickJS object was thrown";
-    case "error":
-      return readErrorProperty(handle, "message") ?? "Error";
+export class Deferred {
+  constructor(
+    readonly promise: JSValue,
+    readonly resolveFunction: JSValue,
+    readonly rejectFunction: JSValue,
+  ) {
+    promise.vm.assertSameVM(resolveFunction, rejectFunction);
+  }
+
+  resolve(value: JSValue): void {
+    this.promise.vm.callFunction(this.resolveFunction, this.promise.vm.undefined, value).dispose();
+  }
+
+  reject(value: JSValue): void {
+    this.promise.vm.callFunction(this.rejectFunction, this.promise.vm.undefined, value).dispose();
+  }
+
+  dispose(): void {
+    this.promise.dispose();
+    this.resolveFunction.dispose();
+    this.rejectFunction.dispose();
+  }
+
+  [Symbol.dispose](): void {
+    this.dispose();
   }
 }
 
-function primitiveString(handle: JSValue): string | null {
-  switch (handle.type) {
-    case "undefined":
-      return "undefined";
-    case "null":
-      return "null";
-    case "boolean":
-      return String(handle.toBoolean());
-    case "number":
-      return String(handle.toNumber());
-    case "bigint":
-      return String(handle.toBigInt());
-    case "string":
-      return handle.toString();
-    case "function":
-    case "array":
-    case "error":
-    case "object":
-    case "symbol":
-      return null;
+export class JSException extends Error {
+  readonly value: JSValue;
+
+  constructor(value: JSValue) {
+    const isError = value.type === "error";
+    const name = isError ? (value.errorProperty("name") ?? "Error") : "JSException";
+    const message = isError ? (value.errorProperty("message") ?? "Error") : value.thrownMessage();
+    super(message);
+    this.name = name;
+    if (isError) this.stack = value.errorProperty("stack") ?? this.stack;
+    this.value = value;
   }
-}
 
-function valueCString(handle: JSValue): string {
-  const size = new Uint8Array(8);
-  const text = handle.vm.native.qjs_bun_to_cstring_len(handle.vm.ctx, size, handle.ptr);
-  if (text === null) throw handle.vm.getException();
-  return readCString(handle.vm, text, Number(read.u64(ptr(size))));
-}
+  dispose(): void {
+    this.value.dispose();
+  }
 
-function valueType(handle: JSValue): JSValueType {
-  const tag = valueTag(handle.ptr);
-  switch (tag) {
-    case QuickJSValueTag.UNDEFINED:
-      return "undefined";
-    case QuickJSValueTag.NULL:
-      return "null";
-    case QuickJSValueTag.BOOL:
-      return "boolean";
-    case QuickJSValueTag.INT:
-    case QuickJSValueTag.FLOAT64:
-      return "number";
-    case QuickJSValueTag.BIG_INT:
-    case QuickJSValueTag.SHORT_BIG_INT:
-      return "bigint";
-    case QuickJSValueTag.STRING:
-    case QuickJSValueTag.STRING_ROPE:
-      return "string";
-    case QuickJSValueTag.SYMBOL:
-      return "symbol";
-    case QuickJSValueTag.OBJECT:
-      if (handle.vm.native.qjs_bun_is_function(handle.vm.ctx, handle.ptr)) return "function";
-      {
-        const isArray = handle.vm.native.qjs_bun_is_array(handle.vm.ctx, handle.ptr);
-        if (isArray < 0) throw handle.vm.getException();
-        if (isArray) return "array";
-      }
-      if (handle.vm.native.qjs_bun_is_error(handle.vm.ctx, handle.ptr)) return "error";
-      return "object";
-    default:
-      throw new TypeError(`Unknown QuickJS value tag: ${tag}`);
+  [Symbol.dispose](): void {
+    this.dispose();
   }
 }

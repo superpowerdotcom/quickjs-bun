@@ -1,17 +1,18 @@
 import { afterAll, afterEach, expect, test } from "bun:test";
 import { CString, ptr, read, toArrayBuffer } from "bun:ffi";
 import {
+  JSException,
+  JSRuntime,
   JSValue,
   QuickJS,
-  JSRuntime,
-  JSException,
   QUICKJS_DEFAULT_STACK_SIZE,
   QUICKJS_VALUE_CELL_BYTES,
   QUICKJS_VERSION_TEXT,
   QuickJSAtom,
-  QuickJSCFunction,
   QuickJSEvalFlags,
+  QuickJSGetOwnPropertyNamesFlags,
   QuickJSParseJsonFlags,
+  QuickJSPrimitiveHint,
   QuickJSPromiseState,
   QuickJSPropertyFlags,
   QuickJSReadObjectFlags,
@@ -27,7 +28,7 @@ import {
 
 const runtimes: JSRuntime[] = [];
 const library = new QuickJS();
-const quickJSNative = library.native;
+const native = library.native;
 const encoder = new TextEncoder();
 const valueCell = () => new Uint8Array(QUICKJS_VALUE_CELL_BYTES);
 const readU64 = (cell: Uint8Array) => read.u64(ptr(cell));
@@ -57,12 +58,11 @@ test("reports the vendored QuickJS version", () => {
 
 test("exposes raw QuickJS bindings and constants to Bun", () => {
   const source = encoder.encode("export const value = 1;\0");
-  expect(quickJSNative.JS_DetectModule(source, source.length - 1)).toBe(1);
-  expect(typeof quickJSNative.qjs_bun_eval).toBe("function");
-  expect(typeof quickJSNative.qjs_bun_write_object).toBe("function");
-  expect(typeof quickJSNative.qjs_bun_new_c_function).toBe("function");
-  expect(typeof quickJSNative.qjs_bun_value_is_nan).toBe("function");
-  expect(QuickJSCFunction.GENERIC).toBe(0);
+  expect(native.JS_DetectModule(source, source.length - 1)).toBe(1);
+  expect(typeof native.qjs_bun_eval).toBe("function");
+  expect(typeof native.qjs_bun_write_object).toBe("function");
+  expect(typeof native.JS_NewRuntime).toBe("function");
+  expect(typeof native.JS_SetInterruptHandler).toBe("function");
   expect(QuickJSAtom.NULL).toBe(0);
   expect(QUICKJS_DEFAULT_STACK_SIZE).toBe(1024 * 1024);
   expect(QUICKJS_VALUE_CELL_BYTES).toBe(16);
@@ -75,19 +75,20 @@ test("exposes raw QuickJS bindings and constants to Bun", () => {
 test("disposes with raw runtime opaque values", () => {
   const instance = vm();
   const opaque = new Uint8Array(8);
-  quickJSNative.JS_SetRuntimeOpaque(instance.ptr, ptr(opaque));
-  instance.dispose();
+  native.JS_SetRuntimeOpaque(instance.runtime.ptr, ptr(opaque));
+  expect(instance.runtime.getOpaque()).toBe(ptr(opaque));
+  instance.runtime.dispose();
 });
 
 test("does not overwrite raw context opaque values for host functions", () => {
   const instance = vm();
   const opaque = new Uint8Array(8);
-  quickJSNative.JS_SetContextOpaque(instance.ctx, ptr(opaque));
+  native.JS_SetContextOpaque(instance.ctx, ptr(opaque));
   using fn = instance.newFunction(() => 42);
   instance.setGlobal("host", fn);
   using result = instance.evalCode("host()");
   expect(result.toNumber()).toBe(42);
-  expect(quickJSNative.JS_GetContextOpaque(instance.ctx)).toBe(ptr(opaque));
+  expect(native.JS_GetContextOpaque(instance.ctx)).toBe(ptr(opaque));
 });
 
 test("creates independent contexts on one runtime", () => {
@@ -112,9 +113,12 @@ test("creates independent contexts on one runtime", () => {
   expect(runtime.memoryUsage().memoryUsedSize > 0n).toBe(true);
 });
 
-test("registers simple native classes and class prototypes", () => {
+test("registers native classes with prototypes, opaque pointers, and finalizers", () => {
   using runtime = new JSRuntime({ library });
-  const classId = runtime.registerClass("Box");
+  const finalized: Array<number | null> = [];
+  const classId = runtime.registerClass("Box", {
+    finalizer: (opaque) => finalized.push(opaque),
+  });
   expect(runtime.isRegisteredClass(classId)).toBe(true);
 
   using context = runtime.createContext();
@@ -140,6 +144,13 @@ test("registers simple native classes and class prototypes", () => {
   expect(protoKind.toString()).toBe("box");
   using objectProtoClass = context.newObjectProtoClass(prototype, classId);
   expect(objectProtoClass.classId).toBe(classId);
+
+  {
+    using transient = context.newObjectClass(classId);
+    transient.setOpaque(7);
+  }
+  runtime.runGC();
+  expect(finalized).toEqual([7]);
 });
 
 test("loads host source modules through a runtime module loader", () => {
@@ -180,6 +191,28 @@ test("loads host source modules through a runtime module loader", () => {
       flags: QuickJSEvalFlags.TYPE_MODULE,
     }),
   ).toThrow("could not load module");
+});
+
+test("normalizes module names through a host normalizer", () => {
+  using runtime = new JSRuntime({ library });
+  const normalized: string[] = [];
+  runtime.setModuleLoader(
+    (name) => (name === "virtual:dep" ? "export const answer = 7;" : undefined),
+    (base, name) => {
+      normalized.push(`${base} -> ${name}`);
+      return name.startsWith("virtual:") ? name : `virtual:${name}`;
+    },
+  );
+  using context = runtime.createContext();
+  context
+    .evalCode('import { answer } from "dep"; globalThis.answer = answer;', {
+      filename: "main.js",
+      flags: QuickJSEvalFlags.TYPE_MODULE,
+    })
+    .dispose();
+  using answer = context.getGlobal("answer");
+  expect(answer.toNumber()).toBe(7);
+  expect(normalized).toEqual(["main.js -> dep"]);
 });
 
 test("executes compiled global and module code", () => {
@@ -304,9 +337,11 @@ test("creates raw contexts and adds selected intrinsics", () => {
   using before = context.evalCode("typeof JSON + ':' + typeof Promise + ':' + typeof Date");
   expect(before.toString()).toBe("undefined:undefined:undefined");
 
-  context.addIntrinsics(["json", "promise"]);
-  using after = context.evalCode("typeof JSON + ':' + typeof Promise + ':' + typeof Date");
-  expect(after.toString()).toBe("object:function:undefined");
+  context.addIntrinsics(["json", "promise", "typedArrays"]);
+  using after = context.evalCode(
+    "typeof JSON + ':' + typeof Promise + ':' + typeof Date + ':' + typeof Atomics",
+  );
+  expect(after.toString()).toBe("object:function:undefined:undefined");
 });
 
 test("exposes runtime limits and memory controls", () => {
@@ -332,7 +367,7 @@ test("exposes runtime limits and memory controls", () => {
     context.evalCode(
       "const items = []; while (true) items.push(new Array(1000).fill('x').join(''))",
     ),
-  ).toThrow();
+  ).toThrow("out of memory");
   runtime.runGC();
   expect(runtime.memoryUsedBytes() > 0n).toBe(true);
   expect(runtime.dumpMemoryUsage()).toContain("QuickJS memory usage");
@@ -342,108 +377,73 @@ test("exposes runtime limits and memory controls", () => {
 test("exposes raw JSValue bridge helpers", () => {
   const instance = vm();
   using text = instance.newString("answer");
-  const atom = quickJSNative.qjs_bun_value_to_atom(instance.ctx, text.ptr);
+  const atom = native.qjs_bun_value_to_atom(instance.ctx, text.ptr);
   expect(atom).toBeGreaterThan(0);
-  quickJSNative.JS_FreeAtom(instance.ctx, atom);
+  native.JS_FreeAtom(instance.ctx, atom);
 
   const sizeCell = new Uint8Array(8);
   using value = instance.evalCode("({ answer: 42 })");
-  expect(quickJSNative.qjs_bun_get_class_id(value.ptr)).toBeGreaterThan(0);
-  const bytes = quickJSNative.qjs_bun_write_object(
+  expect(native.qjs_bun_get_class_id(value.ptr)).toBeGreaterThan(0);
+  const bytes = native.qjs_bun_write_object(
     instance.ctx,
     sizeCell,
     value.ptr,
     QuickJSWriteObjectFlags.REFERENCE,
   );
-  if (bytes === null) throw new Error("JS_WriteObject returned null");
+  if (typeof bytes !== "number") throw new Error("JS_WriteObject returned null");
 
   try {
     const size = Number(readU64(sizeCell));
     const copy = new Uint8Array(toArrayBuffer(bytes, 0, size));
     const out = valueCell();
-    quickJSNative.qjs_bun_read_object(
+    native.qjs_bun_read_object(
       instance.ctx,
+      out,
       copy,
       copy.length,
       QuickJSReadObjectFlags.REFERENCE,
-      out,
     );
     using decoded = new JSValue(instance, out, true);
     expect(instance.dump(decoded)).toEqual({ answer: 42 });
   } finally {
-    quickJSNative.js_free(instance.ctx, bytes);
+    native.js_free(instance.ctx, bytes);
   }
 
-  const out = valueCell();
-  quickJSNative.qjs_bun_new_int32(instance.ctx, 42, out);
-  using number = new JSValue(instance, out, true);
-  expect(number.toNumber()).toBe(42);
-  expect(quickJSNative.qjs_bun_is_number(number.ptr)).toBe(1);
-  expect(quickJSNative.qjs_bun_value_get_norm_tag(number.ptr)).toBe(QuickJSValueTag.INT);
-
-  const floatOut = valueCell();
-  quickJSNative.qjs_bun_new_float64(instance.ctx, 1.5, floatOut);
-  using float = new JSValue(instance, floatOut, true);
-  expect(float.toNumber()).toBe(1.5);
-
   using nan = instance.evalCode("NaN");
-  expect(quickJSNative.qjs_bun_value_is_nan(nan.ptr)).toBe(1);
-  expect(Number.isNaN(quickJSNative.qjs_bun_value_get_float64(nan.ptr))).toBe(true);
-
-  const catchOut = valueCell();
-  quickJSNative.qjs_bun_new_catch_offset(instance.ctx, 7, catchOut);
-  using catchOffset = new JSValue(instance, catchOut, true);
-  expect(quickJSNative.qjs_bun_value_get_norm_tag(catchOffset.ptr)).toBe(
-    QuickJSValueTag.CATCH_OFFSET,
-  );
-
-  const cStringOut = valueCell();
-  quickJSNative.qjs_bun_new_string(instance.ctx, encoder.encode("cstring\0"), cStringOut);
-  using cString = new JSValue(instance, cStringOut, true);
-  expect(cString.toString()).toBe("cstring");
+  expect(nan.isNaN()).toBe(true);
+  expect(Number.isNaN(nan.float64Value)).toBe(true);
 
   const ownedStringCell = valueCell();
-  quickJSNative.qjs_bun_new_string_len(instance.ctx, encoder.encode("owned"), 5n, ownedStringCell);
+  native.qjs_bun_new_string_len(instance.ctx, ownedStringCell, encoder.encode("owned"), 5);
   const ownedString = new JSValue(instance, ownedStringCell, true);
   expect(ownedString.toString()).toBe("owned");
   ownedString.dispose();
   ownedString.dispose();
 
   const bigintOut = valueCell();
-  quickJSNative.qjs_bun_new_bigint64(instance.ctx, 123n, bigintOut);
+  native.qjs_bun_new_bigint64(instance.ctx, bigintOut, 123n);
   using bigint = new JSValue(instance, bigintOut, true);
   expect(bigint.toBigInt()).toBe(123n);
 
-  const nameAtom = quickJSNative.JS_NewAtom(instance.ctx, encoder.encode("alpha\0"));
+  const nameAtom = native.JS_NewAtom(instance.ctx, encoder.encode("alpha\0"));
   const atomStringOut = valueCell();
-  quickJSNative.qjs_bun_atom_to_string(instance.ctx, nameAtom, atomStringOut);
+  native.qjs_bun_atom_to_string(instance.ctx, atomStringOut, nameAtom);
   using atomString = new JSValue(instance, atomStringOut, true);
   expect(atomString.toString()).toBe("alpha");
   const atomLength = new Uint8Array(8);
-  const atomText = quickJSNative.JS_AtomToCStringLen(instance.ctx, ptr(atomLength), nameAtom);
-  if (atomText === null) throw new Error("JS_AtomToCString returned null");
+  const atomText = native.JS_AtomToCStringLen(instance.ctx, atomLength, nameAtom);
+  if (typeof atomText !== "number") throw new Error("JS_AtomToCString returned null");
   try {
     expect(readU64(atomLength)).toBe(5n);
-    expect(String(new CString(atomText, 0, 5))).toBe("alpha");
+    expect(new CString(atomText, 0, 5) as string).toBe("alpha");
   } finally {
-    quickJSNative.JS_FreeCString(instance.ctx, atomText);
+    native.JS_FreeCString(instance.ctx, atomText);
   }
-  quickJSNative.JS_FreeAtom(instance.ctx, nameAtom);
+  native.JS_FreeAtom(instance.ctx, nameAtom);
 
   const json = encoder.encode('{"answer":42}\0');
-  const plainParsedOut = valueCell();
-  quickJSNative.qjs_bun_parse_json(
-    instance.ctx,
-    plainParsedOut,
-    json,
-    json.length - 1,
-    encoder.encode("<json>\0"),
-  );
-  using plainParsed = new JSValue(instance, plainParsedOut, true);
-  expect(instance.dump(plainParsed)).toEqual({ answer: 42 });
-
   const parsedOut = valueCell();
-  quickJSNative.qjs_bun_parse_json2(
+  native.qjs_bun_parse_json(
     instance.ctx,
     parsedOut,
     json,
@@ -455,66 +455,39 @@ test("exposes raw JSValue bridge helpers", () => {
   expect(instance.dump(parsed)).toEqual({ answer: 42 });
 
   const textLengthCell = new Uint8Array(8);
-  const objectText = quickJSNative.qjs_bun_to_cstring_len(instance.ctx, textLengthCell, parsed.ptr);
-  if (objectText === null) throw new Error("JS_ToCStringLen returned null");
+  const objectText = native.qjs_bun_to_cstring_len(instance.ctx, textLengthCell, parsed.ptr, 0);
+  if (typeof objectText !== "number") throw new Error("JS_ToCStringLen returned null");
   try {
     expect(readU64(textLengthCell)).toBe(15n);
-    expect(String(new CString(objectText, 0, 15))).toBe("[object Object]");
+    expect(new CString(objectText, 0, 15) as string).toBe("[object Object]");
   } finally {
-    quickJSNative.JS_FreeCString(instance.ctx, objectText);
+    native.JS_FreeCString(instance.ctx, objectText);
   }
 
   const bufferBytes = new Uint8Array([1, 2, 3]);
   const bufferOut = valueCell();
-  quickJSNative.qjs_bun_new_array_buffer_copy(
-    instance.ctx,
-    bufferOut,
-    bufferBytes,
-    bufferBytes.length,
-  );
+  native.qjs_bun_new_array_buffer_copy(instance.ctx, bufferOut, bufferBytes, bufferBytes.length);
   using buffer = new JSValue(instance, bufferOut, true);
   const byteLengthCell = new Uint8Array(8);
-  const data = quickJSNative.qjs_bun_get_array_buffer(instance.ctx, byteLengthCell, buffer.ptr);
-  if (data === null) throw new Error("JS_GetArrayBuffer returned null");
+  const data = native.qjs_bun_get_array_buffer(instance.ctx, byteLengthCell, buffer.ptr);
+  if (typeof data !== "number") throw new Error("JS_GetArrayBuffer returned null");
   const byteLength = Number(readU64(byteLengthCell));
   expect([...new Uint8Array(toArrayBuffer(data, 0, byteLength))]).toEqual([1, 2, 3]);
 
-  const externalOut = valueCell();
-  quickJSNative.qjs_bun_new_array_buffer(
-    instance.ctx,
-    externalOut,
-    ptr(bufferBytes),
-    bufferBytes.length,
-    null,
-    null,
-    0,
-  );
-  using external = new JSValue(instance, externalOut, true);
-  instance.setGlobal("buffer", external);
-  using externalData = instance.evalCode("new Uint8Array(buffer).join(',')");
-  expect(externalData.toString()).toBe("1,2,3");
-
   using typedArray = instance.evalCode("new Uint8Array([4, 5])");
   const typedBufferOut = valueCell();
-  quickJSNative.qjs_bun_get_typed_array_buffer(
+  const info = new BigUint64Array(3);
+  native.qjs_bun_get_typed_array_buffer(
     instance.ctx,
-    typedArray.ptr,
-    null,
-    null,
-    null,
     typedBufferOut,
+    typedArray.ptr,
+    info.subarray(0, 1),
+    info.subarray(1, 2),
+    info.subarray(2, 3),
   );
   using typedBuffer = new JSValue(instance, typedBufferOut, true);
-  const typedByteLength = new Uint8Array(8);
-  const typedData = quickJSNative.qjs_bun_get_array_buffer(
-    instance.ctx,
-    typedByteLength,
-    typedBuffer.ptr,
-  );
-  if (typedData === null) throw new Error("JS_GetArrayBuffer returned null");
-  expect([
-    ...new Uint8Array(toArrayBuffer(typedData, 0, Number(readU64(typedByteLength)))),
-  ]).toEqual([4, 5]);
+  expect([...typedBuffer.arrayBufferBytes()]).toEqual([4, 5]);
+  expect(Number(info[1])).toBe(2);
 });
 
 test("evaluates code and exposes raw JSValue objects", () => {
@@ -547,7 +520,7 @@ test("wraps context-level native helpers directly", () => {
   expect(instance.detectModule("export const value = 1;")).toBe(true);
   expect(instance.detectModule("const value = 1;")).toBe(false);
   expect(instance.hasException()).toBe(false);
-  quickJSNative.qjs_bun_throw_type_error(instance.ctx, encoder.encode("manual\0"), valueCell());
+  native.qjs_bun_throw_error(instance.ctx, 1, encoder.encode("manual\0"));
   expect(instance.hasException()).toBe(true);
   using manualException = instance.getException();
   expect(manualException.name).toBe("TypeError");
@@ -564,6 +537,8 @@ test("wraps context-level native helpers directly", () => {
   expect(atomCopy.toString()).toBe("alpha");
   using numberAtom = instance.newAtom(7);
   expect(numberAtom.toString()).toBe("7");
+  using numberAtomValue = numberAtom.toValue();
+  expect(numberAtomValue.toString()).toBe("7");
   using uint32Atom = instance.newAtomUInt32(8);
   expect(uint32Atom.toString()).toBe("8");
 
@@ -588,20 +563,41 @@ test("wraps context-level native helpers directly", () => {
   expect(uint32.toNumber()).toBe(0xffffffff);
   using float64 = instance.newFloat64(1.5);
   expect(float64.float64Value).toBe(1.5);
-  using catchOffset = instance.newCatchOffset(7);
-  expect(catchOffset.normTag).toBe(QuickJSValueTag.CATCH_OFFSET);
+  expect(float64.tag).toBe(QuickJSValueTag.FLOAT64);
   using atomized = instance.newAtomString("atomized");
   expect(atomized.toString()).toBe("atomized");
   using date = instance.newDate(0);
   instance.setGlobal("date", date);
   using iso = instance.evalCode("date.toISOString()");
   expect(iso.toString()).toBe("1970-01-01T00:00:00.000Z");
+  expect(date.toDate().getTime()).toBe(0);
+  expect(() => parsed.toDate()).toThrow("not a Date");
+  using symbol = instance.newSymbol("tag");
+  expect(symbol.type).toBe("symbol");
+  using globalSymbol = instance.newSymbol("shared", true);
+  instance.setGlobal("shared", globalSymbol);
+  using sameSymbol = instance.evalCode("shared === Symbol.for('shared')");
+  expect(sameSymbol.toBoolean()).toBe(true);
 
   using buffer = instance.newArrayBufferCopy(new Uint8Array([1, 2, 3]));
   expect([...buffer.arrayBufferBytes()]).toEqual([1, 2, 3]);
   using length = instance.newNumber(3);
   using typedArray = instance.newTypedArray(QuickJSTypedArray.UINT8, length);
   expect(typedArray.length).toBe(3);
+});
+
+test("shares host memory through zero-copy array buffers", () => {
+  const instance = vm();
+  const shared = new Uint8Array([1, 2, 3, 4]);
+  using buffer = instance.newArrayBuffer(shared);
+  instance.setGlobal("shared", buffer);
+  using sum = instance.evalCode("new Uint8Array(shared).reduce((a, b) => a + b, 0)");
+  expect(sum.toNumber()).toBe(10);
+  shared[0] = 10;
+  using updated = instance.evalCode("new Uint8Array(shared)[0]");
+  expect(updated.toNumber()).toBe(10);
+  instance.evalCode("new Uint8Array(shared)[3] = 40").dispose();
+  expect(shared[3]).toBe(40);
 });
 
 test("wraps value-level native helpers directly", () => {
@@ -633,6 +629,7 @@ test("wraps value-level native helpers directly", () => {
   expect(Box.isConstructor()).toBe(true);
   using instanceValue = Box.construct(two);
   expect(instanceValue.isInstanceOf(Box)).toBe(true);
+  expect(instanceValue.ordinaryIsInstanceOf(Box)).toBe(true);
   using value = instanceValue.getProp("value");
   expect(value.toNumber()).toBe(2);
 
@@ -653,10 +650,14 @@ test("wraps value-level native helpers directly", () => {
   using text = number.coerceToString();
   expect(text.isString()).toBe(true);
   expect(text.toString()).toBe("123");
-  using keySource = instance.evalCode("({ toString() { return 'name' } })");
+  using boxed = number.coerceToObject();
+  expect(boxed.type).toBe("object");
+  using keySource = instance.evalCode("({ toString() { return 'name' }, valueOf() { return 5 } })");
   expect(keySource.isObject()).toBe(true);
   using key = keySource.toPropertyKey();
   expect(key.toString()).toBe("name");
+  using primitive = keySource.coerceToPrimitive(QuickJSPrimitiveHint.NUMBER);
+  expect(primitive.toNumber()).toBe(5);
 
   using typedArray = instance.evalCode("new Uint8Array([4, 5])");
   using buffer = typedArray.typedArrayBuffer();
@@ -684,6 +685,8 @@ test("wraps value-level native helpers directly", () => {
   expect(numericString.coerceToUint32()).toBe(42);
   expect(numericString.coerceToInt64()).toBe(42n);
   expect(numericString.coerceToIndex()).toBe(42n);
+  using huge = instance.newNumber(1e12);
+  expect(huge.coerceToInt32Saturated()).toBe(0x7fffffff);
   using bigint = instance.evalCode("42n");
   expect(bigint.isBigInt()).toBe(true);
   expect(bigint.coerceToBigInt64()).toBe(42n);
@@ -697,18 +700,13 @@ test("wraps value-level native helpers directly", () => {
   expect(nan.isNaN()).toBe(true);
 
   const exceptionCell = valueCell();
-  quickJSNative.qjs_bun_throw_type_error(instance.ctx, encoder.encode("boom\0"), exceptionCell);
-  using exception = new JSValue(instance, exceptionCell, true);
+  native.qjs_bun_throw_error(instance.ctx, 1, encoder.encode("boom\0"));
+  new DataView(exceptionCell.buffer).setInt32(8, QuickJSValueTag.EXCEPTION, true);
+  const exception = new JSValue(instance, exceptionCell, false);
   expect(exception.isException()).toBe(true);
-  const pendingException = valueCell();
-  quickJSNative.qjs_bun_get_exception(instance.ctx, pendingException);
-  new JSValue(instance, pendingException, true).dispose();
+  instance.getException().dispose();
   const uninitializedCell = valueCell();
-  new DataView(uninitializedCell.buffer).setBigInt64(
-    8,
-    BigInt(QuickJSValueTag.UNINITIALIZED),
-    true,
-  );
+  new DataView(uninitializedCell.buffer).setInt32(8, QuickJSValueTag.UNINITIALIZED, true);
   const uninitialized = new JSValue(instance, uninitializedCell, false);
   expect(uninitialized.isUninitialized()).toBe(true);
 
@@ -721,7 +719,7 @@ test("wraps value-level native helpers directly", () => {
   using dynamicKey = instance.newString("dynamicKey");
   using atom = dynamicKey.toAtom();
   expect(atom.toString()).toBe("dynamicKey");
-  expect(dynamicKey.normTag).toBe(QuickJSValueTag.STRING);
+  expect(dynamicKey.tag).toBe(QuickJSValueTag.STRING);
 
   using descriptorObject = instance.newObject();
   using hidden = instance.newString("secret");
@@ -746,6 +744,28 @@ test("wraps value-level native helpers directly", () => {
   descriptorObject.defineProp("marker", marker);
   using markerValue = descriptorObject.getPropWithReceiver("markerValue", descriptorObject);
   expect(markerValue.toNumber()).toBe(42);
+  const descriptor = descriptorObject.getOwnPropertyDescriptor("markerValue");
+  expect(descriptor).toBeDefined();
+  expect(descriptor!.flags & QuickJSPropertyFlags.GETSET).toBe(QuickJSPropertyFlags.GETSET);
+  expect(descriptor!.get.strictEquals(getter)).toBe(true);
+  expect(descriptor!.set.strictEquals(setter)).toBe(true);
+  descriptor!.value.dispose();
+  descriptor!.get.dispose();
+  descriptor!.set.dispose();
+  expect(descriptorObject.getOwnPropertyDescriptor("missing")).toBeUndefined();
+  descriptorObject.defineProperty("defined", {
+    value: marker,
+    flags: QuickJSPropertyFlags.HAS_ENUMERABLE | QuickJSPropertyFlags.ENUMERABLE,
+  });
+  expect(descriptorObject.keys()).toEqual(["count", "first", "marker", "defined"]);
+  using symbolKey = instance.evalCode("Symbol('hidden')");
+  using symbolAtom = symbolKey.toAtom();
+  descriptorObject.defineProp(symbolAtom, marker);
+  const atoms = descriptorObject.ownAtoms(QuickJSGetOwnPropertyNamesFlags.SYMBOL_MASK);
+  expect(atoms.length).toBe(1);
+  using symbolValue = atoms[0]!.toValue();
+  expect(symbolValue.strictEquals(symbolKey)).toBe(true);
+  for (const owned of atoms) owned.dispose();
 
   using indexed = instance.newArray();
   using first = instance.newString("first");
@@ -756,6 +776,8 @@ test("wraps value-level native helpers directly", () => {
   using thirdValue = indexed.getIndex(2);
   expect(firstValue.toString()).toBe("first");
   expect(thirdValue.toString()).toBe("third");
+  using viaNumberKey = indexed.getProp(2);
+  expect(viaNumberKey.toString()).toBe("third");
 
   using Fn = instance.evalCode("(function Fn() {})");
   using proto = instance.newObject();
@@ -772,6 +794,28 @@ test("wraps value-level native helpers directly", () => {
   expect(instance.dump(htmlDDASemantics)).toEqual({ type: "undefined", nullish: true });
 });
 
+test("iterates guest iterables and closes them on early exit", () => {
+  const instance = vm();
+  using array = instance.evalCode("[1, 2, 3]");
+  const items: number[] = [];
+  for (const item of array) {
+    items.push(item.toNumber());
+    item.dispose();
+  }
+  expect(items).toEqual([1, 2, 3]);
+
+  using generator = instance.evalCode(`
+    globalThis.closed = false;
+    ({ [Symbol.iterator]() { return { next: () => ({ value: 1, done: false }), return() { globalThis.closed = true; return {} } } } })
+  `);
+  for (const item of generator) {
+    item.dispose();
+    break;
+  }
+  using closed = instance.getGlobal("closed");
+  expect(closed.toBoolean()).toBe(true);
+});
+
 test("dumps primitive and JSON values explicitly", () => {
   const instance = vm();
   using string = instance.evalCode("'hello'");
@@ -785,9 +829,11 @@ test("dumps primitive and JSON values explicitly", () => {
   const uint64 = 1n << 63n;
   const hugeBigint = 1n << 100n;
   const negativeHugeBigint = -(1n << 100n);
+  const giantBigint = (1n << 200n) + 1n;
   using uint64Value = instance.newValue(uint64);
   using hugeBigintValue = instance.newValue(hugeBigint);
   using negativeHugeBigintValue = instance.newValue(negativeHugeBigint);
+  using giantBigintValue = instance.newValue(giantBigint);
 
   expect(instance.dump(string)).toBe("hello");
   expect(emptyString.toString()).toBe("");
@@ -824,6 +870,35 @@ test("dumps primitive and JSON values explicitly", () => {
   expect(instance.dump(uint64Value)).toBe(uint64);
   expect(instance.dump(hugeBigintValue)).toBe(hugeBigint);
   expect(instance.dump(negativeHugeBigintValue)).toBe(negativeHugeBigint);
+  expect(instance.dump(giantBigintValue)).toBe(giantBigint);
+});
+
+test("round-trips host values that take the JSON fast path and the structural path", () => {
+  const instance = vm();
+  using fast = instance.newValue({ a: 1, b: [true, null, "x\0y", { c: 1.5 }], d: "" });
+  expect(instance.dump(fast)).toEqual({ a: 1, b: [true, null, "x\0y", { c: 1.5 }], d: "" });
+  using slow = instance.newValue({
+    negativeZero: -0,
+    nan: Number.NaN,
+    infinity: Number.POSITIVE_INFINITY,
+    missing: undefined,
+    big: 7n,
+    nested: [undefined, -0],
+  });
+  const dumped = instance.dump(slow) as Record<string, unknown>;
+  expect(Object.is(dumped.negativeZero, -0)).toBe(true);
+  expect(Number.isNaN(dumped.nan)).toBe(true);
+  expect(dumped.infinity).toBe(Number.POSITIVE_INFINITY);
+  expect("missing" in dumped).toBe(true);
+  expect(dumped.missing).toBeUndefined();
+  expect(dumped.big).toBe(7n);
+  expect(dumped.nested).toEqual([undefined, -0]);
+  using large = instance.newValue({
+    text: "y".repeat(100_000),
+    list: Array.from({ length: 5000 }, (_, index) => index),
+  });
+  expect((instance.dump(large) as { text: string }).text.length).toBe(100_000);
+  expect((instance.dump(large) as { list: number[] }).list.length).toBe(5000);
 });
 
 test("dumps cycles by QuickJS object identity", () => {
@@ -1029,13 +1104,54 @@ test("enforces execution timeouts", () => {
   expect(() => instance.dump(getter)).toThrow("timed out");
 });
 
+test("enforces execution timeouts on every property operation", () => {
+  const instance = vm({ timeoutMs: 25 });
+  using proxy = instance.evalCode(`new Proxy({}, {
+    get() { while (true) {} },
+    set() { while (true) {} },
+    has() { while (true) {} },
+    deleteProperty() { while (true) {} },
+    defineProperty() { while (true) {} },
+    ownKeys() { while (true) {} },
+    getPrototypeOf() { while (true) {} },
+  })`);
+  using one = instance.newNumber(1);
+  expect(() => proxy.getProp("x")).toThrow("timed out");
+  expect(() => proxy.setProp("x", one)).toThrow("timed out");
+  expect(() => proxy.hasProp("x")).toThrow("timed out");
+  expect(() => proxy.deleteProp("x")).toThrow("timed out");
+  expect(() => proxy.defineProp("x", one)).toThrow("timed out");
+  expect(() => proxy.keys()).toThrow("timed out");
+  expect(() => proxy.getPrototype()).toThrow("timed out");
+  using coercible = instance.evalCode("({ valueOf() { while (true) {} } })");
+  expect(() => coercible.coerceToNumber()).toThrow("timed out");
+  expect(() => instance.jsonStringify(proxy)).toThrow("timed out");
+  using ok = instance.evalCode("1 + 1");
+  expect(ok.toNumber()).toBe(2);
+});
+
+test("defines host array elements without running inherited setters", () => {
+  const instance = vm();
+  instance
+    .evalCode(
+      'Object.defineProperty(Array.prototype, "0", { set() { globalThis.setterRan = true }, configurable: true })',
+    )
+    .dispose();
+  using array = instance.newValue([1, 2]);
+  instance.setGlobal("array", array);
+  using ran = instance.getGlobal("setterRan");
+  expect(ran.isUndefined()).toBe(true);
+  using first = instance.evalCode("array[0]");
+  expect(first.toNumber()).toBe(1);
+});
+
 test("enforces memory limits", () => {
   const instance = vm({ memoryBytes: 1024 * 1024 });
   expect(() =>
     instance.evalCode(
       "const items = []; while (true) items.push(new Array(1000).fill('x').join(''))",
     ),
-  ).toThrow();
+  ).toThrow("out of memory");
 });
 
 test("enforces stack limits", () => {
@@ -1092,6 +1208,16 @@ test("calls host functions with value arguments", () => {
   instance.setGlobal("box", object);
   using sameThis = instance.evalCode("box.readThis() === box");
   expect(sameThis.toBoolean()).toBe(true);
+  using shape = instance.evalCode(
+    "({ type: typeof add, length: add.length, name: add.name, proto: Object.getPrototypeOf(add) === Function.prototype, bound: typeof add.bind })",
+  );
+  expect(instance.dump(shape)).toEqual({
+    type: "function",
+    length: 0,
+    name: "",
+    proto: true,
+    bound: "function",
+  });
 });
 
 test("throws host function exceptions into QuickJS", () => {
@@ -1109,6 +1235,25 @@ test("throws host function exceptions into QuickJS", () => {
   expect(() => instance.evalCode("fail()")).toThrow(JSException);
   using stack = instance.evalCode("try { fail() } catch (error) { error.stack }");
   expect(stack.toString()).not.toContain(import.meta.url);
+
+  using RangeErrorClass = instance.getGlobal("RangeError");
+  using failWithValue = instance.newFunction(() => {
+    using message = instance.newString("guest range");
+    throw RangeErrorClass.construct(message);
+  });
+  instance.setGlobal("failWithValue", failWithValue);
+  using caught = instance.evalCode(
+    "try { failWithValue() } catch (error) { [error instanceof RangeError, error.message] }",
+  );
+  expect(instance.dump(caught)).toEqual([true, "guest range"]);
+  using failWithException = instance.newFunction(() => {
+    instance.evalCode("throw new SyntaxError('inner')");
+  });
+  instance.setGlobal("failWithException", failWithException);
+  using rethrown = instance.evalCode(
+    "try { failWithException() } catch (error) { [error instanceof SyntaxError, error.message] }",
+  );
+  expect(instance.dump(rethrown)).toEqual([true, "inner"]);
 });
 
 test("creates and resolves deferred promises", () => {
@@ -1247,6 +1392,13 @@ test("keeps the outer timeout armed across re-entrant host calls", () => {
   });
   instance.setGlobal("reenter", reenter);
   expect(() => instance.evalCode("reenter(); while (true) {}")).toThrow("timed out");
+  using slowReenter = instance.newFunction(() => {
+    instance.evalCode("while (true) {}", { timeoutMs: 5_000 }).dispose();
+  });
+  instance.setGlobal("slowReenter", slowReenter);
+  const started = performance.now();
+  expect(() => instance.evalCode("slowReenter()")).toThrow("timed out");
+  expect(performance.now() - started).toBeLessThan(1_000);
 });
 
 test("rejects a zero stack size that would disable the guest stack guard", () => {
@@ -1276,6 +1428,34 @@ test("disposes host argument handles after the call returns", () => {
   expect(() => saved!.ptr).toThrow("disposed");
 });
 
+test("releases host function slots when the guest drops them", () => {
+  const instance = vm();
+  const runtime = instance.runtime;
+  const probe = runtime.slot(() => 0);
+  runtime.release(probe);
+  for (let round = 0; round < 8; round++) {
+    using fn = instance.newFunction(() => round);
+    instance.setGlobal("fn", fn);
+    instance.evalCode("fn()").dispose();
+  }
+  instance.evalCode("globalThis.fn = undefined").dispose();
+  runtime.runGC();
+  const reused = runtime.slot(() => 0);
+  runtime.release(reused);
+  expect(reused).toBeLessThanOrEqual(probe + 8);
+});
+
+test("survives jobs that outlive their context", () => {
+  using runtime = new JSRuntime({ library });
+  using keeper = runtime.createContext();
+  const doomed = runtime.createContext();
+  doomed.enqueueJob(() => undefined);
+  doomed.dispose();
+  expect(() => runtime.executePendingJobs()).toThrow("unavailable");
+  using ok = keeper.evalCode("2 + 2");
+  expect(ok.toNumber()).toBe(4);
+});
+
 test("bounds dump recursion depth instead of overflowing the host stack", () => {
   const instance = vm({ timeoutMs: 5000 });
   using deep = instance.evalCode("let o = {}; for (let i = 0; i < 5000; i++) o = { a: o }; o");
@@ -1293,6 +1473,19 @@ test("times out direct JSValue.dump on malicious getters", () => {
   const instance = vm({ timeoutMs: 25 });
   using getter = instance.evalCode("({ get value() { while (true) {} } })");
   expect(() => getter.dump()).toThrow("timed out");
+});
+
+test("handles many distinct property names and long keys", () => {
+  const instance = vm({ timeoutMs: 5000 });
+  using wide = instance.evalCode(
+    "const o = {}; for (let i = 0; i < 6000; i++) o['key' + i] = i; o['x'.repeat(10000)] = 1; o",
+  );
+  const dumped = instance.dump(wide) as Record<string, number>;
+  expect(Object.keys(dumped).length).toBe(6001);
+  expect(dumped.key5999).toBe(5999);
+  expect(dumped["x".repeat(10000)]).toBe(1);
+  using again = wide.getProp("key123");
+  expect(again.toNumber()).toBe(123);
 });
 
 test("rejects NUL characters in names and filenames", () => {

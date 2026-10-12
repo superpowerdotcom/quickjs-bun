@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
-import { JSCallback, ptr, read, toArrayBuffer, type Pointer } from "bun:ffi";
-import { JSAtom } from "./atom";
-import { Deferred } from "./deferred";
-import { JSException } from "./exception";
+import { JSCallback, read, type Pointer } from "bun:ffi";
 import {
+  bytes,
+  cstring,
+  encoder,
   QuickJSAtom,
   QuickJSEvalFlags,
   QuickJSParseJsonFlags,
@@ -11,32 +11,7 @@ import {
   type QuickJS,
   type QuickJSNative,
 } from "./ffi";
-import {
-  HOST_REQUEST_ARGC_OFFSET,
-  HOST_REQUEST_ARGV_OFFSET,
-  HOST_REQUEST_HOST_ID_OFFSET,
-  HOST_REQUEST_OUT_OFFSET,
-  HOST_REQUEST_THIS_OFFSET,
-  MAX_HOST_FUNCTION_ID,
-  MAX_INT64,
-  MAX_UINT64,
-  MAX_VALUE_DEPTH,
-  MIN_INT64,
-  VALUE_CELL_BYTES,
-  argvCell,
-  bytesView,
-  defaultIntrinsics,
-  encodeCString,
-  encoder,
-  newCell,
-  throwQuickJSError,
-  valueTag,
-  writeNumber,
-  writeTaggedInt,
-} from "./internal";
-import { JSModule } from "./module";
-import { JSRuntime } from "./runtime";
-import { JSValue, dumpHandle } from "./value";
+import type { JSRuntime } from "./runtime";
 import type {
   HostFunction,
   JSBytes,
@@ -49,61 +24,98 @@ import type {
   JSModuleInit,
   JSTypedArrayType,
 } from "./types";
+import { Deferred, JSAtom, JSException, JSModule, JSValue } from "./value";
+
+const intrinsics: readonly JSIntrinsic[] = [
+  "base",
+  "date",
+  "eval",
+  "stringNormalize",
+  "regexp",
+  "regexpCompiler",
+  "json",
+  "proxy",
+  "mapSet",
+  "typedArrays",
+  "promise",
+  "weakRef",
+];
+
+function primitive(tag: number, value: number): Uint8Array {
+  const cell = new Uint8Array(16);
+  const view = new DataView(cell.buffer);
+  if (tag === QuickJSValueTag.FLOAT64) view.setFloat64(0, value, true);
+  else view.setInt32(0, value, true);
+  view.setInt32(8, tag, true);
+  return cell;
+}
+
+function argv(args: readonly JSValue[]): Uint8Array | null {
+  if (args.length === 0) return null;
+  const cells = new Uint8Array(16 * args.length);
+  for (let index = 0; index < args.length; index++) cells.set(args[index]!.cell, index * 16);
+  return cells;
+}
+
+function isJson(value: unknown, depth: number): boolean {
+  if (value === null || typeof value === "string" || typeof value === "boolean") return true;
+  if (typeof value === "number") return Number.isFinite(value) && !Object.is(value, -0);
+  if (typeof value !== "object" || depth >= 1024) return false;
+  if (Array.isArray(value)) {
+    if (Object.keys(value).length !== value.length) return false;
+    for (const item of value) if (!isJson(item, depth + 1)) return false;
+    return true;
+  }
+  const prototype = Object.getPrototypeOf(value);
+  if (prototype !== Object.prototype && prototype !== null) return false;
+  for (const key of Object.keys(value)) {
+    const descriptor = Object.getOwnPropertyDescriptor(value, key)!;
+    if (!("value" in descriptor) || !isJson(descriptor.value, depth + 1)) return false;
+  }
+  return true;
+}
 
 export class JSContext {
   readonly library: QuickJS;
   readonly native: QuickJSNative;
   readonly runtime: JSRuntime;
-
-  #context: Pointer;
-  #disposed = false;
-  #timeoutMs: number;
-  #hosts: (HostFunction | undefined)[] = [];
-  #freeHostSlots: number[] = [];
-  #hostCallback: JSCallback;
-  #moduleCallbacks: JSCallback[] = [];
-
   readonly undefined: JSValue;
   readonly null: JSValue;
   readonly true: JSValue;
   readonly false: JSValue;
+  scratch = Buffer.allocUnsafe(4096);
+
+  #context: Pointer;
+  #disposed = false;
+  #timeoutMs: number;
+  #atoms = new Map<string, number>();
 
   constructor(runtime: JSRuntime, options: JSContextOptions = {}) {
     this.#timeoutMs = options.timeoutMs ?? 1000;
     assert(Number.isFinite(this.#timeoutMs) && this.#timeoutMs > 0, "timeoutMs must be positive");
-
     this.runtime = runtime;
     this.library = runtime.library;
     this.native = runtime.native;
 
-    this.#hostCallback = new JSCallback((request: Pointer) => this.#callHost(request), {
-      args: ["ptr"],
-      returns: "void",
-    });
-    assert(this.#hostCallback.ptr !== null, "Host callback pointer is null");
-
-    const intrinsics = options.intrinsics ?? "default";
-    const context =
-      intrinsics === "default"
-        ? this.native.JS_NewContext(runtime.ptr)
-        : this.native.JS_NewContextRaw(runtime.ptr);
-    if (context === null) this.#hostCallback.close();
-    assert(context !== null, "QuickJS context did not initialize");
+    const raw = options.intrinsics !== undefined && options.intrinsics !== "default";
+    const context = this.native.qjs_bun_new_context(runtime.ptr, raw ? 1 : 0, this.#timeoutMs);
+    assert(typeof context === "number", "QuickJS context did not initialize");
     this.#context = context;
-    this.runtime.registerContext(this);
+    runtime.contexts.set(context, this);
 
-    try {
-      if (intrinsics !== "default") this.addIntrinsics(intrinsics);
-      else this.#hideAtomics();
-    } catch (error) {
-      this.dispose();
-      throw error;
+    this.undefined = new JSValue(this, primitive(QuickJSValueTag.UNDEFINED, 0), false);
+    this.null = new JSValue(this, primitive(QuickJSValueTag.NULL, 0), false);
+    this.true = new JSValue(this, primitive(QuickJSValueTag.BOOL, 1), false);
+    this.false = new JSValue(this, primitive(QuickJSValueTag.BOOL, 0), false);
+
+    if (raw) {
+      try {
+        this.addIntrinsics(options.intrinsics!);
+      } catch (error) {
+        this.dispose();
+        throw error;
+      }
     }
-
-    this.undefined = new JSValue(this, writeTaggedInt(QuickJSValueTag.UNDEFINED, 0), false);
-    this.null = new JSValue(this, writeTaggedInt(QuickJSValueTag.NULL, 0), false);
-    this.true = new JSValue(this, writeTaggedInt(QuickJSValueTag.BOOL, 1), false);
-    this.false = new JSValue(this, writeTaggedInt(QuickJSValueTag.BOOL, 0), false);
   }
 
   get ptr(): Pointer {
@@ -115,8 +127,19 @@ export class JSContext {
     return this.#context;
   }
 
+  get disposed(): boolean {
+    return this.#disposed;
+  }
+
+  get global(): JSValue {
+    const out = new Uint8Array(16);
+    this.native.qjs_bun_get_global(this.ctx, out);
+    return new JSValue(this, out, true);
+  }
+
   getOpaque(): Pointer | null {
-    return this.native.JS_GetContextOpaque(this.ctx) as Pointer | null;
+    const opaque = this.native.JS_GetContextOpaque(this.ctx);
+    return typeof opaque === "number" ? opaque : null;
   }
 
   setOpaque(opaque: Pointer | null): void {
@@ -124,129 +147,99 @@ export class JSContext {
   }
 
   assertSameVM(...values: JSValue[]): void {
-    for (const value of values) {
-      assert(value.vm === this, "JSValue belongs to another VM");
-    }
+    for (const value of values) assert(value.vm === this, "JSValue belongs to another VM");
   }
 
   hasException(): boolean {
     return this.native.JS_HasException(this.ctx) !== 0;
   }
 
-  getException(timedOut = false): JSException {
-    const out = newCell();
+  getException(): JSException {
+    const out = new Uint8Array(16);
     this.native.qjs_bun_get_exception(this.ctx, out);
-    if (timedOut) {
-      this.native.qjs_bun_free_value(this.ctx, ptr(out));
-      return this.#timeoutException();
-    }
     return new JSException(new JSValue(this, out, true));
   }
 
-  resultValue(cell: Uint8Array, timedOut = false): JSValue {
-    if (valueTag(ptr(cell)) !== QuickJSValueTag.EXCEPTION) {
-      return new JSValue(this, cell, true);
-    }
-    throw this.getException(timedOut);
+  resultValue(cell: Uint8Array): JSValue {
+    const value = new JSValue(this, cell, true);
+    if (value.tag !== QuickJSValueTag.EXCEPTION) return value;
+    throw this.getException();
   }
 
   setUncatchableException(uncatchable: boolean): void {
     this.native.JS_SetUncatchableException(this.ctx, uncatchable ? 1 : 0);
   }
 
+  atom(key: string | number | JSAtom): number {
+    if (typeof key === "number") {
+      if (Number.isInteger(key) && key >= 0 && key <= QuickJSAtom.MAX_INT) {
+        return (key | QuickJSAtom.TAG_INT) >>> 0;
+      }
+      key = String(key);
+    } else if (key instanceof JSAtom) {
+      return key.value;
+    }
+    let atom = this.#atoms.get(key);
+    if (atom === undefined) {
+      if (this.#atoms.size >= 4096) {
+        for (const cached of this.#atoms.values()) this.native.JS_FreeAtom(this.ctx, cached);
+        this.#atoms.clear();
+      }
+      const text = encoder.encode(key);
+      atom = this.native.JS_NewAtomLen(this.ctx, text, text.length);
+      assert(atom !== QuickJSAtom.NULL, "QuickJS atom did not initialize");
+      this.#atoms.set(key, atom);
+    }
+    return atom;
+  }
+
   newAtom(value: string | number): JSAtom {
-    return typeof value === "number" ? this.newAtomUInt32(value) : this.#newAtomString(value);
+    if (typeof value === "number") return this.newAtomUInt32(value);
+    const text = encoder.encode(value);
+    const atom = this.native.JS_NewAtomLen(this.ctx, text, text.length);
+    assert(atom !== QuickJSAtom.NULL, "QuickJS atom did not initialize");
+    return new JSAtom(this, atom, true);
   }
 
   newAtomUInt32(value: number): JSAtom {
-    assert(
-      Number.isSafeInteger(value) && value >= 0 && value <= 0xffffffff,
-      "atom value must be a uint32",
-    );
+    assert(Number.isInteger(value) && value >= 0 && value <= 0xffffffff, "atom must be a uint32");
     const atom = this.native.JS_NewAtomUInt32(this.ctx, value);
     assert(atom !== QuickJSAtom.NULL, "QuickJS atom did not initialize");
     return new JSAtom(this, atom, true);
   }
 
-  #newAtomString(value: string): JSAtom {
-    const bytes = encoder.encode(value);
-    const atom = this.native.JS_NewAtomLen(this.ctx, bytes, bytes.length);
-    assert(atom !== QuickJSAtom.NULL, "QuickJS atom did not initialize");
-    return new JSAtom(this, atom, true);
-  }
-
   getScriptOrModuleName(stackLevels = 0): JSAtom | null {
-    assert(
-      Number.isSafeInteger(stackLevels) && stackLevels >= 0,
-      "stackLevels must be a non-negative safe integer",
-    );
+    assert(Number.isInteger(stackLevels) && stackLevels >= 0, "stackLevels must be non-negative");
     const atom = this.native.JS_GetScriptOrModuleName(this.ctx, stackLevels);
     return atom === QuickJSAtom.NULL ? null : new JSAtom(this, atom, true);
   }
 
   addIntrinsic(intrinsic: JSIntrinsic): void {
-    switch (intrinsic) {
-      case "base":
-        assert(
-          this.native.JS_AddIntrinsicBaseObjects(this.ctx) >= 0,
-          "JS_AddIntrinsicBaseObjects failed",
-        );
-        break;
-      case "date":
-        assert(this.native.JS_AddIntrinsicDate(this.ctx) >= 0, "JS_AddIntrinsicDate failed");
-        break;
-      case "eval":
-        assert(this.native.JS_AddIntrinsicEval(this.ctx) >= 0, "JS_AddIntrinsicEval failed");
-        break;
-      case "stringNormalize":
-        assert(
-          this.native.JS_AddIntrinsicStringNormalize(this.ctx) >= 0,
-          "JS_AddIntrinsicStringNormalize failed",
-        );
-        break;
-      case "regexp":
-        assert(this.native.JS_AddIntrinsicRegExp(this.ctx) >= 0, "JS_AddIntrinsicRegExp failed");
-        break;
-      case "regexpCompiler":
-        this.native.JS_AddIntrinsicRegExpCompiler(this.ctx);
-        break;
-      case "json":
-        assert(this.native.JS_AddIntrinsicJSON(this.ctx) >= 0, "JS_AddIntrinsicJSON failed");
-        break;
-      case "proxy":
-        assert(this.native.JS_AddIntrinsicProxy(this.ctx) >= 0, "JS_AddIntrinsicProxy failed");
-        break;
-      case "mapSet":
-        assert(this.native.JS_AddIntrinsicMapSet(this.ctx) >= 0, "JS_AddIntrinsicMapSet failed");
-        break;
-      case "typedArrays":
-        assert(
-          this.native.JS_AddIntrinsicTypedArrays(this.ctx) >= 0,
-          "JS_AddIntrinsicTypedArrays failed",
-        );
-        this.#hideAtomics();
-        break;
-      case "promise":
-        assert(this.native.JS_AddIntrinsicPromise(this.ctx) >= 0, "JS_AddIntrinsicPromise failed");
-        break;
-      case "weakRef":
-        assert(this.native.JS_AddIntrinsicWeakRef(this.ctx) >= 0, "JS_AddIntrinsicWeakRef failed");
-        break;
-      default: {
-        const neverIntrinsic: any = intrinsic;
-        throw new TypeError(`Unknown QuickJS intrinsic: ${neverIntrinsic}`);
-      }
-    }
+    const index = intrinsics.indexOf(intrinsic);
+    assert(index >= 0, `Unknown QuickJS intrinsic: ${intrinsic}`);
+    assert(
+      this.native.qjs_bun_add_intrinsic(this.ctx, index) >= 0,
+      `QuickJS could not add the ${intrinsic} intrinsic`,
+    );
   }
 
-  addIntrinsics(intrinsics: JSIntrinsics): void {
-    const names =
-      intrinsics === "default" ? defaultIntrinsics : intrinsics === "minimal" ? [] : intrinsics;
-    for (const intrinsic of names) this.addIntrinsic(intrinsic);
+  addIntrinsics(names: JSIntrinsics): void {
+    const list =
+      names === "default"
+        ? intrinsics.filter((intrinsic) => intrinsic !== "regexpCompiler")
+        : names === "minimal"
+          ? []
+          : names;
+    for (const intrinsic of list) this.addIntrinsic(intrinsic);
   }
 
   evalCode(code: string, options: JSEvalOptions = {}): JSValue {
-    return this.#eval(code, undefined, options);
+    return this.#eval(code, null, options);
+  }
+
+  evalThis(thisValue: JSValue, code: string, options: JSEvalOptions = {}): JSValue {
+    this.assertSameVM(thisValue);
+    return this.#eval(code, thisValue.ptr, options);
   }
 
   compileCode(code: string, options: JSEvalOptions = {}): JSValue {
@@ -258,41 +251,30 @@ export class JSContext {
 
   evalFunction(value: JSValue): JSValue {
     this.assertSameVM(value);
-    const ownedValue = value.dupCell();
-    const out = newCell();
-    this.#startInterrupt(this.#timeoutMs);
-    this.native.qjs_bun_eval_function(this.ctx, out, ptr(ownedValue));
-    return this.resultValue(out, this.#endInterrupt());
-  }
-
-  evalThis(thisValue: JSValue, code: string, options: JSEvalOptions = {}): JSValue {
-    this.assertSameVM(thisValue);
-    return this.#eval(code, thisValue, options);
+    const out = new Uint8Array(16);
+    this.native.qjs_bun_eval_function(this.ctx, out, value.ptr, this.#timeoutMs);
+    return this.resultValue(out);
   }
 
   detectModule(code: string | Uint8Array): boolean {
-    const bytes = typeof code === "string" ? encoder.encode(code) : code;
-    const source = new Uint8Array(bytes.length + 1);
-    source.set(bytes);
-    return this.native.JS_DetectModule(source, bytes.length) !== 0;
+    const source =
+      typeof code === "string"
+        ? encoder.encode(`${code}\0`)
+        : Buffer.concat([code, Buffer.from([0])]);
+    return this.native.JS_DetectModule(source, source.length - 1) !== 0;
   }
 
   parseJson(text: string, options: JSJsonParseOptions = {}): JSValue {
-    const source = encoder.encode(text);
-    const filename = encodeCString(options.filename ?? "<json>");
-    const out = newCell();
-    if (options.flags === undefined || options.flags === 0) {
-      this.native.qjs_bun_parse_json(this.ctx, out, source, source.length, filename);
-    } else {
-      this.native.qjs_bun_parse_json2(
-        this.ctx,
-        out,
-        source,
-        source.length,
-        filename,
-        options.flags,
-      );
-    }
+    const source = encoder.encode(`${text}\0`);
+    const out = new Uint8Array(16);
+    this.native.qjs_bun_parse_json(
+      this.ctx,
+      out,
+      source,
+      source.length - 1,
+      cstring(options.filename ?? "<json>"),
+      options.flags ?? 0,
+    );
     return this.resultValue(out);
   }
 
@@ -303,10 +285,10 @@ export class JSContext {
     });
   }
 
-  readObject(bytes: JSBytes, flags = 0): JSValue {
-    const view = bytesView(bytes);
-    const out = newCell();
-    this.native.qjs_bun_read_object(this.ctx, view, view.byteLength, flags, out);
+  readObject(data: JSBytes, flags = 0): JSValue {
+    const view = bytes(data);
+    const out = new Uint8Array(16);
+    this.native.qjs_bun_read_object(this.ctx, out, view, view.byteLength, flags);
     return this.resultValue(out);
   }
 
@@ -316,245 +298,174 @@ export class JSContext {
     space: JSValue = this.undefined,
   ): JSValue {
     this.assertSameVM(value, replacer, space);
-    const out = newCell();
+    const out = new Uint8Array(16);
     this.native.qjs_bun_json_stringify(this.ctx, out, value.ptr, replacer.ptr, space.ptr);
     return this.resultValue(out);
   }
 
-  #eval(code: string, thisValue: JSValue | undefined, options: JSEvalOptions): JSValue {
-    const source = encoder.encode(`${code}\0`);
-    const filename = encodeCString(options.filename ?? "<eval>");
-    const flags = options.flags ?? QuickJSEvalFlags.TYPE_GLOBAL;
-    const out = newCell();
-    this.#startInterrupt(options.timeoutMs ?? this.#timeoutMs);
-    if ((flags & QuickJSEvalFlags.TYPE_MASK) === QuickJSEvalFlags.TYPE_MODULE) {
-      if (thisValue === undefined) {
-        this.native.qjs_bun_eval(
-          this.ctx,
-          out,
-          source,
-          source.length - 1,
-          filename,
-          flags | QuickJSEvalFlags.COMPILE_ONLY,
-        );
-      } else {
-        this.native.qjs_bun_eval_this(
-          this.ctx,
-          out,
-          thisValue.ptr,
-          source,
-          source.length - 1,
-          filename,
-          flags | QuickJSEvalFlags.COMPILE_ONLY,
-        );
-      }
-      if (valueTag(ptr(out)) !== QuickJSValueTag.EXCEPTION) {
-        if (this.native.qjs_bun_js_module_set_import_meta(this.ctx, ptr(out), 0, 1) < 0) {
-          const timedOut = this.#endInterrupt();
-          this.native.qjs_bun_free_value(this.ctx, ptr(out));
-          throw this.getException(timedOut);
-        }
-        if ((flags & QuickJSEvalFlags.COMPILE_ONLY) === 0) {
-          const result = newCell();
-          this.native.qjs_bun_eval_function(this.ctx, result, ptr(out));
-          return this.resultValue(result, this.#endInterrupt());
-        }
-      }
-      return this.resultValue(out, this.#endInterrupt());
-    }
-    if (thisValue === undefined) {
-      this.native.qjs_bun_eval(this.ctx, out, source, source.length - 1, filename, flags);
-    } else {
-      this.native.qjs_bun_eval_this(
-        this.ctx,
-        out,
-        thisValue.ptr,
-        source,
-        source.length - 1,
-        filename,
-        flags,
-      );
-    }
-    return this.resultValue(out, this.#endInterrupt());
-  }
-
   callFunction(fn: JSValue, thisValue: JSValue = this.undefined, ...args: JSValue[]): JSValue {
     this.assertSameVM(fn, thisValue, ...args);
-    const argv = argvCell(args);
-    const out = newCell();
-    this.#startInterrupt(this.#timeoutMs);
-    this.native.qjs_bun_call(this.ctx, out, fn.ptr, thisValue.ptr, args.length, argv);
-    return this.resultValue(out, this.#endInterrupt());
+    const out = new Uint8Array(16);
+    this.native.qjs_bun_call(
+      this.ctx,
+      out,
+      fn.ptr,
+      thisValue.ptr,
+      args.length,
+      argv(args),
+      this.#timeoutMs,
+    );
+    return this.resultValue(out);
   }
 
-  invoke(thisValue: JSValue, name: string, ...args: JSValue[]): JSValue {
+  invoke(thisValue: JSValue, name: string | number | JSAtom, ...args: JSValue[]): JSValue {
     this.assertSameVM(thisValue, ...args);
-    using atom = this.newAtom(name);
-    const argv = argvCell(args);
-    const out = newCell();
-    this.#startInterrupt(this.#timeoutMs);
-    this.native.qjs_bun_invoke(this.ctx, out, thisValue.ptr, atom.value, args.length, argv);
-    return this.resultValue(out, this.#endInterrupt());
+    const out = new Uint8Array(16);
+    this.native.qjs_bun_invoke(
+      this.ctx,
+      out,
+      thisValue.ptr,
+      this.atom(name),
+      args.length,
+      argv(args),
+      this.#timeoutMs,
+    );
+    return this.resultValue(out);
   }
 
   callConstructor(fn: JSValue, ...args: JSValue[]): JSValue {
     this.assertSameVM(fn, ...args);
-    const argv = argvCell(args);
-    const out = newCell();
-    this.#startInterrupt(this.#timeoutMs);
-    this.native.qjs_bun_call_constructor(this.ctx, out, fn.ptr, args.length, argv);
-    return this.resultValue(out, this.#endInterrupt());
+    const out = new Uint8Array(16);
+    this.native.qjs_bun_call_constructor(
+      this.ctx,
+      out,
+      fn.ptr,
+      null,
+      args.length,
+      argv(args),
+      this.#timeoutMs,
+    );
+    return this.resultValue(out);
   }
 
   callConstructorWithNewTarget(fn: JSValue, newTarget: JSValue, ...args: JSValue[]): JSValue {
     this.assertSameVM(fn, newTarget, ...args);
-    const argv = argvCell(args);
-    const out = newCell();
-    this.#startInterrupt(this.#timeoutMs);
-    this.native.qjs_bun_call_constructor2(this.ctx, out, fn.ptr, newTarget.ptr, args.length, argv);
-    return this.resultValue(out, this.#endInterrupt());
-  }
-
-  get global(): JSValue {
-    const out = newCell();
-    this.native.qjs_bun_get_global(this.ctx, out);
-    return new JSValue(this, out, true);
+    const out = new Uint8Array(16);
+    this.native.qjs_bun_call_constructor(
+      this.ctx,
+      out,
+      fn.ptr,
+      newTarget.ptr,
+      args.length,
+      argv(args),
+      this.#timeoutMs,
+    );
+    return this.resultValue(out);
   }
 
   newString(value: string): JSValue {
-    const bytes = encoder.encode(value);
-    const out = newCell();
-    this.native.qjs_bun_new_string_len(this.ctx, bytes, bytes.length, out);
+    const text = encoder.encode(value);
+    const out = new Uint8Array(16);
+    this.native.qjs_bun_new_string_len(this.ctx, out, text, text.length);
     return this.resultValue(out);
   }
 
   newBoolean(value: boolean): JSValue {
-    const out = newCell();
-    this.native.qjs_bun_new_bool(this.ctx, value ? 1 : 0, out);
-    return this.resultValue(out);
+    return value ? this.true : this.false;
   }
 
   newNumber(value: number): JSValue {
-    return new JSValue(this, writeNumber(value), false);
+    if (Number.isInteger(value) && Object.is(value, value | 0)) {
+      return new JSValue(this, primitive(QuickJSValueTag.INT, value), false);
+    }
+    return new JSValue(this, primitive(QuickJSValueTag.FLOAT64, value), false);
   }
 
   newInt32(value: number): JSValue {
-    assert(
-      Number.isInteger(value) && value >= -0x80000000 && value <= 0x7fffffff,
-      "value must be an int32",
-    );
-    const out = newCell();
-    this.native.qjs_bun_new_int32(this.ctx, value, out);
-    return this.resultValue(out);
-  }
-
-  newInt64(value: number | bigint): JSValue {
-    if (typeof value === "number")
-      assert(Number.isSafeInteger(value), "value must be a safe integer");
-    const int = BigInt(value);
-    assert(int >= MIN_INT64 && int <= MAX_INT64, "value must be an int64");
-    const out = newCell();
-    this.native.qjs_bun_new_int64(this.ctx, int, out);
-    return this.resultValue(out);
+    assert(Number.isInteger(value) && Object.is(value, value | 0), "value must be an int32");
+    return this.newNumber(value);
   }
 
   newUint32(value: number): JSValue {
     assert(Number.isInteger(value) && value >= 0 && value <= 0xffffffff, "value must be a uint32");
-    const out = newCell();
-    this.native.qjs_bun_new_uint32(this.ctx, value | 0, out);
-    return this.resultValue(out);
+    return this.newNumber(value);
+  }
+
+  newInt64(value: number | bigint): JSValue {
+    const int = BigInt(value);
+    assert(int >= -(1n << 63n) && int <= (1n << 63n) - 1n, "value must be an int64");
+    return this.newNumber(Number(int));
   }
 
   newFloat64(value: number): JSValue {
-    const out = newCell();
-    this.native.qjs_bun_new_float64(this.ctx, value, out);
-    return this.resultValue(out);
-  }
-
-  newCatchOffset(value: number): JSValue {
-    assert(
-      Number.isInteger(value) && value >= -0x80000000 && value <= 0x7fffffff,
-      "value must be an int32",
-    );
-    const out = newCell();
-    this.native.qjs_bun_new_catch_offset(this.ctx, value, out);
-    return this.resultValue(out);
+    return this.newNumber(value);
   }
 
   newBigInt(value: bigint): JSValue {
-    const out = newCell();
-    if (value >= MIN_INT64 && value <= MAX_INT64) {
-      this.native.qjs_bun_new_bigint64(this.ctx, value, out);
-      return this.resultValue(out);
+    const out = new Uint8Array(16);
+    if (value >= -(1n << 63n) && value <= (1n << 63n) - 1n) {
+      this.native.qjs_bun_new_bigint64(this.ctx, out, value);
+    } else if (value >= -(1n << 127n) && value <= (1n << 127n) - 1n) {
+      const low = BigInt.asUintN(64, value);
+      const high = BigInt.asUintN(64, value >> 64n);
+      this.native.qjs_bun_new_bigint128(this.ctx, out, low, high);
+    } else {
+      return this.evalCode(`${value}n`);
     }
-    if (value >= 0n && value <= MAX_UINT64) {
-      this.native.qjs_bun_new_biguint64(this.ctx, value, out);
-      return this.resultValue(out);
-    }
-    return this.evalCode(`${value.toString()}n`);
+    return this.resultValue(out);
   }
 
   newAtomString(value: string): JSValue {
-    const out = newCell();
-    this.native.qjs_bun_new_atom_string(this.ctx, encodeCString(value), out);
+    const out = new Uint8Array(16);
+    this.native.qjs_bun_new_atom_string(this.ctx, out, cstring(value));
+    return this.resultValue(out);
+  }
+
+  newSymbol(description: string, global = false): JSValue {
+    const out = new Uint8Array(16);
+    this.native.qjs_bun_new_symbol(this.ctx, out, cstring(description), global ? 1 : 0);
     return this.resultValue(out);
   }
 
   newObject(): JSValue {
-    const out = newCell();
+    const out = new Uint8Array(16);
     this.native.qjs_bun_new_object(this.ctx, out);
     return this.resultValue(out);
   }
 
   newObjectProto(prototype: JSValue): JSValue {
     this.assertSameVM(prototype);
-    const out = newCell();
-    this.native.qjs_bun_new_object_proto(this.ctx, prototype.ptr, out);
+    const out = new Uint8Array(16);
+    this.native.qjs_bun_new_object_proto(this.ctx, out, prototype.ptr);
     return this.resultValue(out);
   }
 
   newObjectClass(classId: number): JSValue {
-    assert(
-      Number.isSafeInteger(classId) && classId >= 0,
-      "classId must be a non-negative safe integer",
-    );
-    const out = newCell();
-    this.native.qjs_bun_new_object_class(this.ctx, classId, out);
+    const out = new Uint8Array(16);
+    this.native.qjs_bun_new_object_class(this.ctx, out, classId);
     return this.resultValue(out);
   }
 
   newObjectProtoClass(prototype: JSValue, classId: number): JSValue {
     this.assertSameVM(prototype);
-    assert(
-      Number.isSafeInteger(classId) && classId >= 0,
-      "classId must be a non-negative safe integer",
-    );
-    const out = newCell();
-    this.native.qjs_bun_new_object_proto_class(this.ctx, prototype.ptr, classId, out);
+    const out = new Uint8Array(16);
+    this.native.qjs_bun_new_object_proto_class(this.ctx, out, prototype.ptr, classId);
     return this.resultValue(out);
   }
 
   getClassProto(classId: number): JSValue {
-    assert(
-      Number.isSafeInteger(classId) && classId >= 0,
-      "classId must be a non-negative safe integer",
-    );
-    const out = newCell();
-    this.native.qjs_bun_get_class_proto(this.ctx, classId, out);
+    const out = new Uint8Array(16);
+    this.native.qjs_bun_get_class_proto(this.ctx, out, classId);
     return this.resultValue(out);
   }
 
   setClassProto(classId: number, prototype: JSValue): void {
     this.assertSameVM(prototype);
-    assert(
-      Number.isSafeInteger(classId) && classId >= 0,
-      "classId must be a non-negative safe integer",
-    );
     this.native.qjs_bun_set_class_proto(this.ctx, classId, prototype.ptr);
   }
 
   newArray(): JSValue {
-    const out = newCell();
+    const out = new Uint8Array(16);
     this.native.qjs_bun_new_array(this.ctx, out);
     return this.resultValue(out);
   }
@@ -562,207 +473,204 @@ export class JSContext {
   newDate(value: Date | number): JSValue {
     const epochMs = value instanceof Date ? value.getTime() : value;
     assert(Number.isFinite(epochMs), "QuickJS date epoch milliseconds must be finite");
-    const epoch = new Float64Array([epochMs]);
-    const out = newCell();
-    this.native.qjs_bun_new_date(this.ctx, epoch, out);
+    const out = new Uint8Array(16);
+    this.native.qjs_bun_new_date(this.ctx, out, epochMs);
     return this.resultValue(out);
   }
 
-  newArrayBufferCopy(bytes: JSBytes): JSValue {
-    const view = bytesView(bytes);
-    const out = newCell();
+  newArrayBuffer(data: JSBytes): JSValue {
+    const view = bytes(data);
+    const id = this.runtime.slot(view);
+    const out = new Uint8Array(16);
+    this.native.qjs_bun_new_array_buffer(
+      this.ctx,
+      out,
+      view,
+      view.byteLength,
+      this.runtime.hostCallback,
+      id,
+    );
+    try {
+      return this.resultValue(out);
+    } catch (error) {
+      this.runtime.release(id);
+      throw error;
+    }
+  }
+
+  newArrayBufferCopy(data: JSBytes): JSValue {
+    const view = bytes(data);
+    const out = new Uint8Array(16);
     this.native.qjs_bun_new_array_buffer_copy(this.ctx, out, view, view.byteLength);
     return this.resultValue(out);
   }
 
   newTypedArray(type: JSTypedArrayType, ...args: JSValue[]): JSValue {
     this.assertSameVM(...args);
-    const argv = argvCell(args);
-    const out = newCell();
-    this.native.qjs_bun_new_typed_array(this.ctx, out, args.length, argv, type);
+    const out = new Uint8Array(16);
+    this.native.qjs_bun_new_typed_array(this.ctx, out, args.length, argv(args), type);
     return this.resultValue(out);
   }
 
   newError(error: Error): JSValue {
-    const out = newCell();
+    const out = new Uint8Array(16);
     this.native.qjs_bun_new_error(this.ctx, out);
-    using handle = this.resultValue(out);
-    using name = this.newString(error.name);
-    using message = this.newString(error.message);
-    handle.defineProp("name", name);
-    handle.defineProp("message", message);
-    return handle.dup();
+    const handle = this.resultValue(out);
+    try {
+      using name = this.newString(error.name);
+      using message = this.newString(error.message);
+      handle.defineProp("name", name);
+      handle.defineProp("message", message);
+      return handle;
+    } catch (failure) {
+      handle.dispose();
+      throw failure;
+    }
   }
 
   newFunction(fn: HostFunction): JSValue {
-    const context = this.ctx;
-    const callback = this.#hostCallback.ptr;
-    assert(callback !== null, "Host callback pointer is null");
-    const id = this.#allocateHostSlot(fn);
-    const out = newCell();
+    const id = this.runtime.slot(fn);
+    const out = new Uint8Array(16);
+    this.native.qjs_bun_new_host_function(this.ctx, out, this.runtime.hostCallback, id);
     try {
-      this.native.qjs_bun_new_host_function(context, callback, id, out);
       return this.resultValue(out);
     } catch (error) {
-      this.#releaseHostSlot(id);
+      this.runtime.release(id);
       throw error;
     }
   }
 
   enqueueJob(fn: HostFunction, ...args: JSValue[]): void {
     this.assertSameVM(...args);
-    const callback = this.#hostCallback.ptr;
-    assert(callback !== null, "Host callback pointer is null");
-    const id = this.#allocateHostSlot(fn);
-    const argv = argvCell(args);
-    if (this.native.qjs_bun_enqueue_host_job(this.ctx, callback, id, args.length, argv) < 0) {
-      this.#releaseHostSlot(id);
+    using handle = this.newFunction(fn);
+    if (this.native.qjs_bun_enqueue_job(this.ctx, args.length + 1, argv([handle, ...args])) < 0) {
       throw this.getException();
     }
   }
 
-  freeHostSlot(hostId: number): void {
-    if (this.#disposed) return;
-    if (this.#hosts[hostId] === undefined) return;
-    this.#releaseHostSlot(hostId);
-  }
-
-  #allocateHostSlot(fn: HostFunction): number {
-    const recycled = this.#freeHostSlots.pop();
-    if (recycled !== undefined) {
-      this.#hosts[recycled] = fn;
-      return recycled;
-    }
-    const id = this.#hosts.length;
-    assert(id <= MAX_HOST_FUNCTION_ID, "Too many QuickJS host functions");
-    this.#hosts.push(fn);
-    return id;
-  }
-
-  #releaseHostSlot(id: number): void {
-    if (this.#hosts[id] === undefined) return;
-    this.#hosts[id] = undefined;
-    this.#freeHostSlots.push(id);
-  }
-
   newPromise(): Deferred {
-    const promise = newCell();
-    const resolving = new Uint8Array(VALUE_CELL_BYTES * 2);
-    this.native.qjs_bun_new_promise(this.ctx, resolving, promise);
-    const promiseValue = this.resultValue(promise);
-    const resolve = resolving.subarray(0, VALUE_CELL_BYTES);
-    const reject = resolving.subarray(VALUE_CELL_BYTES);
+    const promise = new Uint8Array(16);
+    const resolving = new Uint8Array(32);
+    this.native.qjs_bun_new_promise(this.ctx, promise, resolving);
     return new Deferred(
-      promiseValue,
-      new JSValue(this, resolve, true),
-      new JSValue(this, reject, true),
+      this.resultValue(promise),
+      new JSValue(this, resolving.slice(0, 16), true),
+      new JSValue(this, resolving.slice(16, 32), true),
     );
   }
 
   newCModule(name: string, init: JSModuleInit): JSModule {
     let module: JSModule | undefined;
     const callback = new JSCallback(
-      (context: Pointer, _modulePointer: Pointer) => {
+      (context: Pointer) => {
         try {
-          assert(module !== undefined, "QuickJS module is not initialized");
-          init(module);
+          init(module!);
           return 0;
         } catch (error) {
-          throwQuickJSError(
-            this.native,
-            context,
-            "internal",
-            error instanceof Error ? error.message : String(error),
-          );
+          const message = error instanceof Error ? error.message : String(error);
+          this.native.qjs_bun_throw_error(context, 4, cstring(message));
           return -1;
         }
       },
-      {
-        args: ["ptr", "ptr"],
-        returns: "i32",
-      },
+      { args: ["ptr", "ptr"], returns: "i32" },
     );
-    assert(callback.ptr !== null, "Module init callback pointer is null");
-    const modulePointer = this.native.JS_NewCModule(
-      this.ctx,
-      encodeCString(name),
-      callback.ptr,
-    ) as Pointer | null;
-    if (modulePointer === null) {
+    const pointer = this.native.JS_NewCModule(this.ctx, cstring(name), callback.ptr);
+    if (typeof pointer !== "number") {
       callback.close();
       throw this.getException();
     }
-    module = new JSModule(this, modulePointer);
-    this.#moduleCallbacks.push(callback);
+    this.runtime.callbacks.push(callback);
+    module = new JSModule(this, pointer);
     return module;
   }
 
   newValue(value: unknown): JSValue {
+    if (
+      typeof value === "object" &&
+      value !== null &&
+      !(value instanceof JSValue) &&
+      isJson(value, 0)
+    ) {
+      return this.parseJson(JSON.stringify(value));
+    }
     return this.#newValue(value, 0);
-  }
-
-  #newValue(value: unknown, depth: number): JSValue {
-    if (value instanceof JSValue) {
-      this.assertSameVM(value);
-      return value.dup();
-    }
-    if (value === undefined) return this.undefined;
-    if (value === null) return this.null;
-    if (typeof value === "boolean") return value ? this.true : this.false;
-    if (typeof value === "number") return this.newNumber(value);
-    if (typeof value === "string") return this.newString(value);
-    if (typeof value === "bigint") return this.newBigInt(value);
-    if (value instanceof Error) return this.newError(value);
-    if (value instanceof Promise) {
-      throw new TypeError("Convert host promises explicitly with newPromise()");
-    }
-    assert(
-      depth < MAX_VALUE_DEPTH,
-      `Cannot convert host value nested deeper than ${MAX_VALUE_DEPTH}`,
-    );
-    if (Array.isArray(value)) {
-      using array = this.newArray();
-      for (let index = 0; index < value.length; index++) {
-        using handle = this.#newValue(value[index], depth + 1);
-        array.setIndex(index, handle);
-      }
-      return array.dup();
-    }
-    if (typeof value === "object" && value !== null) {
-      const prototype = Object.getPrototypeOf(value);
-      assert(
-        prototype === Object.prototype || prototype === null,
-        "Only plain objects can be converted to QuickJS",
-      );
-      using object = this.newObject();
-      for (const key of Object.keys(value)) {
-        const descriptor = Object.getOwnPropertyDescriptor(value, key);
-        assert(
-          descriptor !== undefined && "value" in descriptor,
-          "Only data properties can be converted to QuickJS",
-        );
-        using handle = this.#newValue(descriptor.value, depth + 1);
-        object.defineProp(key, handle);
-      }
-      return object.dup();
-    }
-    throw new TypeError(`Cannot convert host ${typeof value} to QuickJS`);
   }
 
   dump(handle: JSValue, options: JSDumpOptions = {}): unknown {
     this.assertSameVM(handle);
-    let ended = false;
-    this.#startInterrupt(this.#timeoutMs);
+    const maxDepth = options.maxDepth ?? 1024;
+    const maxNodes = options.maxNodes ?? 1_000_000;
+    assert(Number.isSafeInteger(maxDepth) && maxDepth > 0, "maxDepth must be a positive integer");
+    assert(Number.isSafeInteger(maxNodes) && maxNodes > 0, "maxNodes must be a positive integer");
+    const seen = new Map<number, unknown>();
+    let nodes = 0;
+    const visit = (value: JSValue, depth: number): unknown => {
+      if (depth > maxDepth)
+        throw new RangeError(`QuickJS dump exceeded maximum depth of ${maxDepth}`);
+      if (++nodes > maxNodes)
+        throw new RangeError(`QuickJS dump exceeded maximum of ${maxNodes} values`);
+      const type = value.type;
+      switch (type) {
+        case "undefined":
+          return undefined;
+        case "null":
+          return null;
+        case "boolean":
+          return value.toBoolean();
+        case "number":
+          return value.toNumber();
+        case "bigint":
+          return value.toBigInt();
+        case "string":
+          return value.toString();
+        case "error":
+          return value.toError();
+        case "array":
+        case "object": {
+          const pointer = read.ptr(value.ptr);
+          const existing = seen.get(pointer);
+          if (existing !== undefined) return existing;
+          if (type === "array") {
+            const array: unknown[] = [];
+            seen.set(pointer, array);
+            const length = value.length;
+            for (let index = 0; index < length; index++) {
+              using entry = value.getIndex(index);
+              array.push(visit(entry, depth + 1));
+            }
+            return array;
+          }
+          const object: Record<string, unknown> = {};
+          seen.set(pointer, object);
+          for (const key of value.keys()) {
+            using entry = value.getProp(key);
+            Object.defineProperty(object, key, {
+              value: visit(entry, depth + 1),
+              enumerable: true,
+              configurable: true,
+              writable: true,
+            });
+          }
+          return object;
+        }
+        default:
+          throw new TypeError(`Cannot dump QuickJS ${type}`);
+      }
+    };
+    const scope = new Float64Array(2);
+    let left = false;
+    this.native.qjs_bun_enter_scope(this.runtime.ptr, this.#timeoutMs, scope);
     try {
-      return dumpHandle(handle, options);
+      return visit(handle, 0);
     } catch (error) {
-      const timedOut = this.#endInterrupt();
-      ended = true;
-      if (!timedOut) throw error;
+      left = true;
+      if (!this.native.qjs_bun_leave_scope(this.runtime.ptr, scope)) throw error;
       if (error instanceof JSException) error.dispose();
-      throw this.#timeoutException();
+      const out = new Uint8Array(16);
+      this.native.qjs_bun_timeout_error(this.ctx, out);
+      throw new JSException(this.resultValue(out));
     } finally {
-      if (!ended) this.#endInterrupt();
+      if (!left) this.native.qjs_bun_leave_scope(this.runtime.ptr, scope);
     }
   }
 
@@ -783,114 +691,99 @@ export class JSContext {
   }
 
   loadModule(basename: string, filename: string): JSValue {
-    const out = newCell();
-    this.native.qjs_bun_load_module(
-      this.ctx,
-      out,
-      encodeCString(basename),
-      encodeCString(filename),
-    );
+    const out = new Uint8Array(16);
+    this.native.qjs_bun_load_module(this.ctx, out, cstring(basename), cstring(filename));
     return this.resultValue(out);
   }
 
   dispose(): void {
     if (this.#disposed) return;
-    this.runtime.unregisterContext(this);
-    this.native.JS_FreeContext(this.#context);
-    this.#hostCallback.close();
-    for (const callback of this.#moduleCallbacks) callback.close();
-    this.#moduleCallbacks.length = 0;
-    this.#hosts.length = 0;
+    for (const atom of this.#atoms.values()) this.native.JS_FreeAtom(this.#context, atom);
+    this.#atoms.clear();
     this.#disposed = true;
+    this.runtime.contexts.delete(this.#context);
+    this.native.qjs_bun_free_context(this.#context);
   }
 
   [Symbol.dispose](): void {
     this.dispose();
   }
 
-  #hideAtomics(): void {
-    const out = newCell();
-    this.native.qjs_bun_get_global(this.ctx, out);
-    using global = new JSValue(this, out, true);
-    global.deleteProp("Atomics");
-  }
-
-  #timeoutException(): JSException {
-    using handle = this.newError(new Error("QuickJS execution timed out"));
-    using name = this.newString("TimeoutError");
-    handle.defineProp("name", name);
-    return new JSException(handle.dup());
-  }
-
-  #callHost(request: Pointer): void {
-    const hostId = read.u32(request, HOST_REQUEST_HOST_ID_OFFSET);
-    const host = this.#hosts[hostId];
-    const argc = read.u32(request, HOST_REQUEST_ARGC_OFFSET);
-    const thisHandle = this.#dupBorrowed(request, HOST_REQUEST_THIS_OFFSET);
-    const args: JSValue[] = [];
-    try {
-      assert(host !== undefined, "Unknown QuickJS host function");
-      if (argc > 0) {
-        const argv = read.ptr(request, HOST_REQUEST_ARGV_OFFSET) as Pointer | null;
-        assert(argv !== null, "Host argv pointer is null");
-        for (let index = 0; index < argc; index++) {
-          args.push(this.#dupBorrowed(argv, index * VALUE_CELL_BYTES));
-        }
-      }
-      const result = host.call(thisHandle, ...args);
-      if (result instanceof JSValue) {
-        this.assertSameVM(result);
-        this.#finishHostRequest(request, result, false);
-        result.dispose();
-      } else {
-        using handle = this.newValue(result);
-        this.#finishHostRequest(request, handle, false);
-      }
-    } catch (error) {
-      this.#failHostRequest(request, error);
-    } finally {
-      thisHandle.dispose();
-      for (const arg of args) arg.dispose();
-    }
-  }
-
-  #dupBorrowed(source: Pointer, offset: number): JSValue {
-    const borrowed = new JSValue(
-      this,
-      new Uint8Array(toArrayBuffer(source, offset, VALUE_CELL_BYTES)),
-      false,
+  #eval(code: string, thisValue: Pointer | null, options: JSEvalOptions): JSValue {
+    const timeoutMs = options.timeoutMs ?? this.#timeoutMs;
+    assert(Number.isFinite(timeoutMs) && timeoutMs > 0, "timeoutMs must be positive");
+    const source = encoder.encode(`${code}\0`);
+    const out = new Uint8Array(16);
+    this.native.qjs_bun_eval(
+      this.ctx,
+      out,
+      thisValue,
+      source,
+      source.length - 1,
+      cstring(options.filename ?? "<eval>"),
+      options.flags ?? QuickJSEvalFlags.TYPE_GLOBAL,
+      timeoutMs,
     );
-    return borrowed.dup();
+    return this.resultValue(out);
   }
 
-  #failHostRequest(request: Pointer, error: unknown): void {
+  #newValue(value: unknown, depth: number): JSValue {
+    if (value instanceof JSValue) {
+      this.assertSameVM(value);
+      return value.dup();
+    }
+    if (value === undefined) return this.undefined;
+    if (value === null) return this.null;
+    switch (typeof value) {
+      case "boolean":
+        return value ? this.true : this.false;
+      case "number":
+        return this.newNumber(value);
+      case "string":
+        return this.newString(value);
+      case "bigint":
+        return this.newBigInt(value);
+    }
+    if (value instanceof Error) return this.newError(value);
+    if (value instanceof Promise) {
+      throw new TypeError("Convert host promises explicitly with newPromise()");
+    }
+    if (typeof value !== "object")
+      throw new TypeError(`Cannot convert host ${typeof value} to QuickJS`);
+    assert(depth < 1024, "Cannot convert host value nested deeper than 1024");
+    if (Array.isArray(value)) {
+      const array = this.newArray();
+      try {
+        for (let index = 0; index < value.length; index++) {
+          using item = this.#newValue(value[index], depth + 1);
+          array.defineIndex(index, item);
+        }
+        return array;
+      } catch (error) {
+        array.dispose();
+        throw error;
+      }
+    }
+    const prototype = Object.getPrototypeOf(value);
+    assert(
+      prototype === Object.prototype || prototype === null,
+      "Only plain objects can be converted to QuickJS",
+    );
+    const object = this.newObject();
     try {
-      using handle = this.newError(error instanceof Error ? error : new Error(String(error)));
-      this.#finishHostRequest(request, handle, true);
-    } catch (fallbackError) {
-      if (fallbackError instanceof JSException) fallbackError.dispose();
-      const out = new Uint8Array(toArrayBuffer(request, HOST_REQUEST_OUT_OFFSET, VALUE_CELL_BYTES));
-      this.native.qjs_bun_throw_out_of_memory(this.ctx, out);
+      for (const key of Object.keys(value)) {
+        const descriptor = Object.getOwnPropertyDescriptor(value, key);
+        assert(
+          descriptor !== undefined && "value" in descriptor,
+          "Only data properties can be converted to QuickJS",
+        );
+        using item = this.#newValue(descriptor.value, depth + 1);
+        object.defineProp(key, item);
+      }
+      return object;
+    } catch (error) {
+      object.dispose();
+      throw error;
     }
-  }
-
-  #finishHostRequest(request: Pointer, handle: JSValue, throwValue: boolean): void {
-    const out = new Uint8Array(toArrayBuffer(request, HOST_REQUEST_OUT_OFFSET, VALUE_CELL_BYTES));
-    if (throwValue) {
-      const thrown = handle.dupCell();
-      this.native.qjs_bun_throw(this.ctx, ptr(thrown), out);
-    } else if (valueTag(handle.ptr) >= 0) {
-      out.set(handle.cell);
-    } else {
-      this.native.qjs_bun_dup_value(this.ctx, handle.ptr, out);
-    }
-  }
-
-  #startInterrupt(timeoutMs: number): void {
-    this.runtime.startInterrupt(timeoutMs);
-  }
-
-  #endInterrupt(): boolean {
-    return this.runtime.endInterrupt();
   }
 }
