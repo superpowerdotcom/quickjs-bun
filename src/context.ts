@@ -433,7 +433,8 @@ export class JSContext {
       const high = BigInt.asUintN(64, value >> 64n);
       this.native.qjs_bun_new_bigint128(this.ctx, out, low, high);
     } else {
-      return this.evalCode(`${value}n`);
+      const text = encoder.encode(`${value}`);
+      this.native.qjs_bun_new_bigint_string(this.ctx, out, text, text.length);
     }
     return this.resultValue(out);
   }

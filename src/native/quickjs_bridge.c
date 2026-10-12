@@ -711,6 +711,7 @@ QJS_OUT(qjs_bun_new_symbol, (JSContext * ctx, JSValue *out, const char *descript
 QJS_OUT(qjs_bun_new_bigint64, (JSContext * ctx, JSValue *out, int64_t v), JS_NewBigInt64(ctx, v))
 QJS_OUT(qjs_bun_new_biguint64, (JSContext * ctx, JSValue *out, uint64_t v), JS_NewBigUint64(ctx, v))
 QJS_OUT(qjs_bun_new_bigint128, (JSContext * ctx, JSValue *out, uint64_t low, uint64_t high), JS_NewBigInt128(ctx, low, high))
+QJS_OUT(qjs_bun_new_bigint_string, (JSContext * ctx, JSValue *out, const uint8_t *s, uint64_t len), JS_StringToBigIntErr(ctx, JS_NewStringLen(ctx, (const char *)s, (size_t)len)))
 QJS_RET(int, qjs_bun_to_bigint128, (JSContext * ctx, uint64_t *low, uint64_t *high, const JSValue *v), JS_ToBigInt128Sat(ctx, low, high, *v))
 QJS_OUT(qjs_bun_new_object, (JSContext * ctx, JSValue *out), JS_NewObject(ctx))
 QJS_OUT(qjs_bun_new_object_proto, (JSContext * ctx, JSValue *out, const JSValue *proto), JS_NewObjectProto(ctx, *proto))
@@ -839,7 +840,7 @@ QJS_GUEST_RET(qjs_bun_iterator_close, (JSContext * ctx, const JSValue *iterator,
   X(qjs_bun_get_exception) X(JS_HasException) X(qjs_bun_throw) X(qjs_bun_throw_error) X(qjs_bun_throw_out_of_memory) X(JS_SetUncatchableException) \
   X(qjs_bun_dup_value) X(qjs_bun_free_value) X(qjs_bun_type) X(qjs_bun_get_class_id) \
   X(qjs_bun_new_string_len) X(qjs_bun_to_cstring_copy) X(qjs_bun_to_cstring_len) X(JS_FreeCString) \
-  X(qjs_bun_new_bigint64) X(qjs_bun_new_biguint64) X(qjs_bun_new_bigint128) X(qjs_bun_to_bigint128) X(qjs_bun_new_symbol) \
+  X(qjs_bun_new_bigint64) X(qjs_bun_new_biguint64) X(qjs_bun_new_bigint128) X(qjs_bun_new_bigint_string) X(qjs_bun_to_bigint128) X(qjs_bun_new_symbol) \
   X(qjs_bun_new_object) X(qjs_bun_new_object_proto) X(qjs_bun_new_object_class) X(qjs_bun_new_object_proto_class) X(qjs_bun_new_array) \
   X(qjs_bun_new_date) X(qjs_bun_date_value) X(qjs_bun_new_error) X(qjs_bun_new_promise) X(qjs_bun_promise_state) X(qjs_bun_promise_result) \
   X(qjs_bun_new_host_function) X(qjs_bun_enqueue_job) X(qjs_bun_new_atom_string) \

@@ -1782,6 +1782,13 @@ test("rejects misuse that would corrupt the engine", () => {
   other.close();
 });
 
+test("creates bigints of any size without the eval intrinsic", () => {
+  using context = vm({ intrinsics: ["base"] });
+  using huge = context.newBigInt(-(2n ** 300n) - 7n);
+  expect(huge.toBigInt()).toBe(-(2n ** 300n) - 7n);
+  expect(() => context.evalCode("1")).toThrow("eval is not supported");
+});
+
 test("refuses module exports before a C module is instantiated", () => {
   using context = vm();
   const module = context.newCModule("early", () => {});
