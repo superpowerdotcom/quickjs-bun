@@ -1,8 +1,7 @@
 import type { Pointer } from "bun:ffi";
-import { QuickJSTypedArray, type QuickJS } from "./ffi";
 import type { JSContext } from "./context";
-import type { JSModule } from "./module";
-import type { JSValue } from "./value";
+import type { QuickJS, QuickJSTypedArray } from "./ffi";
+import type { JSModule, JSValue } from "./value";
 
 export type JSIntrinsic =
   | "base"
@@ -40,22 +39,31 @@ export interface JSEvalOptions {
   flags?: number;
   timeoutMs?: number;
 }
+
 export interface JSJsonParseOptions {
   filename?: string;
   flags?: number;
 }
+
+export interface JSClassOptions {
+  finalizer?: (opaque: Pointer | null) => void;
+}
+
 export type JSTypedArrayType = (typeof QuickJSTypedArray)[keyof typeof QuickJSTypedArray];
 export type JSBytes = ArrayBufferLike | ArrayBufferView<ArrayBufferLike>;
+
 export interface JSTypedArrayInfo {
   buffer: JSValue;
   byteLength: number;
   byteOffset: number;
   bytesPerElement: number;
 }
+
 export interface JSOpaque {
   classId: number;
   pointer: Pointer;
 }
+
 export interface JSPrintOptions {
   maxDepth?: number;
   maxItemCount?: number;
@@ -63,16 +71,34 @@ export interface JSPrintOptions {
   rawDump?: boolean;
   showHidden?: boolean;
 }
+
 export interface JSDumpOptions {
   maxDepth?: number;
   maxNodes?: number;
 }
+
+export interface JSPropertyDescriptor {
+  flags: number;
+  get: JSValue;
+  set: JSValue;
+  value: JSValue;
+}
+
+export interface JSPropertyDefinition {
+  flags?: number;
+  get?: JSValue;
+  set?: JSValue;
+  value?: JSValue;
+}
+
 export type JSModuleInit = (module: JSModule) => void;
 export type JSModuleLoader = (
   moduleName: string,
   context: JSContext,
   attributes: JSValue,
 ) => JSBytes | JSModule | string | null | undefined;
+export type JSModuleNormalizer = (baseName: string, name: string, context: JSContext) => string;
+
 export interface JSPromiseRejection {
   context: JSContext;
   isHandled: boolean;
@@ -102,11 +128,11 @@ export type JSValueType =
   | "number"
   | "bigint"
   | "string"
+  | "symbol"
+  | "object"
   | "function"
   | "array"
-  | "error"
-  | "object"
-  | "symbol";
+  | "error";
 
 export interface JSMemoryUsage {
   arrayCount: bigint;

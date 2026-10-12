@@ -1,24 +1,13 @@
-// oxlint-disable-next-line typescript/triple-slash-reference
-/// <reference path="./src/ambient.d.ts" />
-
-export { JSAtom } from "./src/atom";
 export { JSContext } from "./src/context";
-export { Deferred } from "./src/deferred";
-export { JSException } from "./src/exception";
-export { JSModule } from "./src/module";
-export { JSRuntime } from "./src/runtime";
-export { JSValue } from "./src/value";
-
 export {
   QuickJS,
   QuickJSAtom,
   QuickJSCallFlags,
   QuickJSClassId,
-  QuickJSCFunction,
   QuickJSEvalFlags,
-  QuickJSFunctionListEntry,
   QuickJSGetOwnPropertyNamesFlags,
   QuickJSParseJsonFlags,
+  QuickJSPrimitiveHint,
   QuickJSPromiseState,
   QuickJSPropertyFlags,
   QuickJSReadObjectFlags,
@@ -34,12 +23,12 @@ export {
   type QuickJSPath,
   type QuickJSPromiseStateValue,
 } from "./src/ffi";
-
+export { JSRuntime } from "./src/runtime";
 export type {
   HostFunction,
   HostValue,
-  JSValueType,
   JSBytes,
+  JSClassOptions,
   JSContextOptions,
   JSDumpOptions,
   JSEvalOptions,
@@ -49,11 +38,16 @@ export type {
   JSMemoryUsage,
   JSModuleInit,
   JSModuleLoader,
+  JSModuleNormalizer,
   JSOpaque,
   JSPrintOptions,
   JSPromiseRejection,
   JSPromiseRejectionTracker,
+  JSPropertyDefinition,
+  JSPropertyDescriptor,
   JSRuntimeOptions,
   JSTypedArrayInfo,
   JSTypedArrayType,
+  JSValueType,
 } from "./src/types";
+export { Deferred, JSAtom, JSException, JSModule, JSValue } from "./src/value";

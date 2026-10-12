@@ -1,41 +1,14 @@
-import { FFIType, JSCallback, cc, dlopen, type Library, type Pointer } from "bun:ffi";
-import quickJSVersionText from "../quickjs/VERSION" with { type: "text" };
-import type { JSRuntime } from "./runtime";
+import { cc, dlopen, FFIType, linkSymbols, type FFIFunction, type Library } from "bun:ffi";
+import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import type { JSBytes } from "./types";
 
-const sourcePath = (path: string) => Bun.fileURLToPath(new URL(path, import.meta.url));
-const quickJSSources = [
-  sourcePath("./native/quickjs.c"),
-  sourcePath("../quickjs/cutils.c"),
-  sourcePath("../quickjs/libunicode.c"),
-  sourcePath("../quickjs/libregexp.c"),
-  sourcePath("../quickjs/dtoa.c"),
-  sourcePath("./native/alloca.S"),
-];
-const quickJSLibraries = ["m"];
-const nativeInclude = [
-  sourcePath("./native/"),
-  sourcePath("../quickjs/"),
-  ...(process.env.QUICKJS_BUN_NATIVE_INCLUDE?.split(":").filter(Boolean) ?? []),
-];
-
-export type QuickJSPath = string | URL;
-export interface QuickJSOptions {
-  path?: QuickJSPath;
-}
-
-export const QUICKJS_VERSION_TEXT = quickJSVersionText.trim();
-
+export const QUICKJS_VERSION_TEXT = readFileSync(
+  new URL("../quickjs/VERSION", import.meta.url),
+  "utf8",
+).trim();
 export const QUICKJS_VALUE_CELL_BYTES = 16;
-
-const usize = FFIType.u64_fast;
-type FFIArg = "buffer" | "f64" | "i32" | "i64" | "ptr" | "u32" | "u64" | typeof usize;
-type FFIReturn = FFIArg | "void";
-
-const fn = <const Args extends readonly FFIArg[], const Return extends FFIReturn>(
-  args: Args,
-  returns: Return,
-) => ({ args, returns });
-const voidFn = <const Args extends readonly FFIArg[]>(args: Args) => fn(args, "void");
+export const QUICKJS_DEFAULT_STACK_SIZE = 1024 * 1024;
 
 export const QuickJSValueTag = {
   FIRST: -9,
@@ -124,6 +97,12 @@ export const QuickJSPromiseState = {
 export type QuickJSPromiseStateValue =
   (typeof QuickJSPromiseState)[keyof typeof QuickJSPromiseState];
 
+export const QuickJSPrimitiveHint = {
+  STRING: 0,
+  NUMBER: 1,
+  NONE: 2,
+} as const;
+
 export const QuickJSParseJsonFlags = {
   EXT: 1 << 0,
 } as const;
@@ -153,356 +132,304 @@ export const QuickJSCallFlags = {
 
 export const QuickJSAtom = {
   NULL: 0,
-} as const;
-
-export const QUICKJS_DEFAULT_STACK_SIZE = 1024 * 1024;
-
-export const QuickJSCFunction = {
-  GENERIC: 0,
-  GENERIC_MAGIC: 1,
-  CONSTRUCTOR: 2,
-  CONSTRUCTOR_MAGIC: 3,
-  CONSTRUCTOR_OR_FUNC: 4,
-  CONSTRUCTOR_OR_FUNC_MAGIC: 5,
-  CONSTRUCTOR_OR_FUNC_FLAGS: 6,
-  F_F: 7,
-  F_F_F: 8,
-  GETTER: 9,
-  SETTER: 10,
-  GETTER_MAGIC: 11,
-  SETTER_MAGIC: 12,
-  ITERATOR_NEXT: 13,
-} as const;
-
-export const QuickJSFunctionListEntry = {
-  C_FUNC: 0,
-  C_GETSET: 1,
-  C_GETSET_MAGIC: 2,
-  PROP_STRING: 3,
-  PROP_INT32: 4,
-  PROP_INT64: 5,
-  PROP_DOUBLE: 6,
-  PROP_UNDEFINED: 7,
-  OBJECT: 8,
-  ALIAS: 9,
-  PROP_ATOM: 10,
-  PROP_BOOL: 11,
+  TAG_INT: 0x80000000,
+  MAX_INT: 0x7fffffff,
 } as const;
 
 export const QuickJSClassId = {
   INVALID: 0,
 } as const;
 
-const nativeSymbols = {
-  JS_NewRuntime: fn([], "ptr"),
-  JS_NewRuntime2: fn(["ptr", "ptr"], "ptr"),
-  JS_FreeRuntime: voidFn(["ptr"]),
-  JS_SetRuntimeInfo: voidFn(["ptr", "buffer"]),
-  JS_SetMemoryLimit: voidFn(["ptr", usize]),
-  JS_SetGCThreshold: voidFn(["ptr", usize]),
-  JS_SetMaxStackSize: voidFn(["ptr", usize]),
-  JS_UpdateStackTop: voidFn(["ptr"]),
-  JS_RunGC: voidFn(["ptr"]),
-  JS_SetRuntimeOpaque: voidFn(["ptr", "ptr"]),
-  JS_GetRuntimeOpaque: fn(["ptr"], "ptr"),
-  JS_ComputeMemoryUsage: voidFn(["ptr", "buffer"]),
-  JS_NewContext: fn(["ptr"], "ptr"),
-  JS_NewContextRaw: fn(["ptr"], "ptr"),
-  JS_FreeContext: voidFn(["ptr"]),
-  JS_DupContext: fn(["ptr"], "ptr"),
-  JS_GetRuntime: fn(["ptr"], "ptr"),
-  JS_SetContextOpaque: voidFn(["ptr", "ptr"]),
-  JS_GetContextOpaque: fn(["ptr"], "ptr"),
-  JS_AddIntrinsicBaseObjects: fn(["ptr"], "i32"),
-  JS_AddIntrinsicDate: fn(["ptr"], "i32"),
-  JS_AddIntrinsicEval: fn(["ptr"], "i32"),
-  JS_AddIntrinsicStringNormalize: fn(["ptr"], "i32"),
-  JS_AddIntrinsicRegExpCompiler: voidFn(["ptr"]),
-  JS_AddIntrinsicRegExp: fn(["ptr"], "i32"),
-  JS_AddIntrinsicJSON: fn(["ptr"], "i32"),
-  JS_AddIntrinsicProxy: fn(["ptr"], "i32"),
-  JS_AddIntrinsicMapSet: fn(["ptr"], "i32"),
-  JS_AddIntrinsicTypedArrays: fn(["ptr"], "i32"),
-  JS_AddIntrinsicPromise: fn(["ptr"], "i32"),
-  JS_AddIntrinsicWeakRef: fn(["ptr"], "i32"),
-  JS_NewClassID: fn(["buffer"], "u32"),
-  JS_NewClass: fn(["ptr", "u32", "ptr"], "i32"),
-  JS_IsRegisteredClass: fn(["ptr", "u32"], "i32"),
-  JS_NewAtomLen: fn(["ptr", "buffer", usize], "u32"),
-  JS_NewAtom: fn(["ptr", "buffer"], "u32"),
-  JS_NewAtomUInt32: fn(["ptr", "u32"], "u32"),
-  JS_DupAtom: fn(["ptr", "u32"], "u32"),
-  JS_FreeAtom: voidFn(["ptr", "u32"]),
-  JS_FreeAtomRT: voidFn(["ptr", "u32"]),
-  JS_AtomToCStringLen: fn(["ptr", "ptr", "u32"], "ptr"),
-  JS_FreeCString: voidFn(["ptr", "ptr"]),
-  JS_FreePropertyEnum: voidFn(["ptr", "ptr", "u32"]),
-  JS_DetectModule: fn(["buffer", usize], "i32"),
-  JS_SetUncatchableException: voidFn(["ptr", "i32"]),
-  JS_HasException: fn(["ptr"], "i32"),
-  JS_SetCanBlock: voidFn(["ptr", "i32"]),
-  JS_SetStripInfo: voidFn(["ptr", "i32"]),
-  JS_GetStripInfo: fn(["ptr"], "i32"),
-  JS_IsJobPending: fn(["ptr"], "i32"),
-  JS_ExecutePendingJob: fn(["ptr", "buffer"], "i32"),
-  JS_SetSharedArrayBufferFunctions: voidFn(["ptr", "ptr"]),
-  JS_SetHostPromiseRejectionTracker: voidFn(["ptr", "ptr", "ptr"]),
-  JS_SetInterruptHandler: voidFn(["ptr", "ptr", "ptr"]),
-  JS_SetModuleLoaderFunc: voidFn(["ptr", "ptr", "ptr", "ptr"]),
-  JS_SetModuleLoaderFunc2: voidFn(["ptr", "ptr", "ptr", "ptr", "ptr"]),
-  JS_GetScriptOrModuleName: fn(["ptr", "i32"], "u32"),
-  JS_GetModuleName: fn(["ptr", "ptr"], "u32"),
-  JS_EnqueueJob: fn(["ptr", "ptr", "i32", "buffer"], "i32"),
-  JS_NewCModule: fn(["ptr", "buffer", "ptr"], "ptr"),
-  JS_AddModuleExport: fn(["ptr", "ptr", "buffer"], "i32"),
-  JS_AddModuleExportList: fn(["ptr", "ptr", "ptr", "i32"], "i32"),
-  JS_SetModuleExportList: fn(["ptr", "ptr", "ptr", "i32"], "i32"),
-  JS_PrintValueSetDefaultOptions: voidFn(["buffer"]),
-  js_malloc_rt: fn(["ptr", usize], "ptr"),
-  js_free_rt: voidFn(["ptr", "ptr"]),
-  js_realloc_rt: fn(["ptr", "ptr", usize], "ptr"),
-  js_malloc_usable_size_rt: fn(["ptr", "ptr"], "u64"),
-  js_mallocz_rt: fn(["ptr", usize], "ptr"),
-  js_malloc: fn(["ptr", usize], "ptr"),
-  js_free: voidFn(["ptr", "ptr"]),
-  js_realloc: fn(["ptr", "ptr", usize], "ptr"),
-  js_malloc_usable_size: fn(["ptr", "ptr"], "u64"),
-  js_realloc2: fn(["ptr", "ptr", usize, "buffer"], "ptr"),
-  js_mallocz: fn(["ptr", usize], "ptr"),
-  js_strdup: fn(["ptr", "buffer"], "ptr"),
-  js_strndup: fn(["ptr", "buffer", usize], "ptr"),
-  JS_DumpMemoryUsage: voidFn(["ptr", "buffer", "ptr"]),
+export const encoder = new TextEncoder();
 
-  qjs_bun_new_class: fn(["ptr", "u32", "buffer"], "i32"),
-  qjs_bun_init_host_slot_class: fn(["ptr"], "i32"),
-  qjs_bun_set_host_slot_finalizer: voidFn(["ptr"]),
-  qjs_bun_compile_module: fn(["ptr", "buffer", usize, "buffer"], "ptr"),
-  qjs_bun_dump_memory_usage: fn(["ptr", "buffer"], "ptr"),
-  qjs_bun_set_module_loader_func2: voidFn(["ptr", "ptr"]),
-  qjs_bun_set_host_promise_rejection_tracker: voidFn(["ptr", "ptr"]),
-  qjs_bun_eval: voidFn(["ptr", "buffer", "buffer", usize, "buffer", "i32"]),
-  qjs_bun_eval_this: voidFn(["ptr", "buffer", "ptr", "buffer", usize, "buffer", "i32"]),
-  qjs_bun_call: voidFn(["ptr", "buffer", "ptr", "ptr", "u32", "ptr"]),
-  qjs_bun_invoke: voidFn(["ptr", "buffer", "ptr", "u32", "u32", "ptr"]),
-  qjs_bun_call_constructor: voidFn(["ptr", "buffer", "ptr", "u32", "ptr"]),
-  qjs_bun_call_constructor2: voidFn(["ptr", "buffer", "ptr", "ptr", "u32", "ptr"]),
-  qjs_bun_string_code_point_range: voidFn(["ptr", "buffer", "ptr", "u32", "ptr"]),
-  qjs_bun_get_exception: voidFn(["ptr", "buffer"]),
-  qjs_bun_get_global: voidFn(["ptr", "buffer"]),
-  qjs_bun_new_string: voidFn(["ptr", "buffer", "buffer"]),
-  qjs_bun_new_string_len: voidFn(["ptr", "buffer", usize, "buffer"]),
-  qjs_bun_new_object: voidFn(["ptr", "buffer"]),
-  qjs_bun_new_array: voidFn(["ptr", "buffer"]),
-  qjs_bun_new_error: voidFn(["ptr", "buffer"]),
-  qjs_bun_new_promise: voidFn(["ptr", "buffer", "buffer"]),
-  qjs_bun_throw: voidFn(["ptr", "ptr", "buffer"]),
-  qjs_bun_get_data_property: voidFn(["ptr", "ptr", "u32", "buffer"]),
-  qjs_bun_get_property_str: voidFn(["ptr", "ptr", "buffer", "buffer"]),
-  qjs_bun_get_property_u32: voidFn(["ptr", "ptr", "u32", "buffer"]),
-  qjs_bun_promise_result: voidFn(["ptr", "ptr", "buffer"]),
-  qjs_bun_read_object: voidFn(["ptr", "buffer", usize, "i32", "buffer"]),
-  qjs_bun_throw_syntax_error: voidFn(["ptr", "buffer", "buffer"]),
-  qjs_bun_throw_type_error: voidFn(["ptr", "buffer", "buffer"]),
-  qjs_bun_throw_reference_error: voidFn(["ptr", "buffer", "buffer"]),
-  qjs_bun_throw_range_error: voidFn(["ptr", "buffer", "buffer"]),
-  qjs_bun_throw_internal_error: voidFn(["ptr", "buffer", "buffer"]),
-  qjs_bun_throw_out_of_memory: voidFn(["ptr", "buffer"]),
-  qjs_bun_new_bool: voidFn(["ptr", "i32", "buffer"]),
-  qjs_bun_new_catch_offset: voidFn(["ptr", "i32", "buffer"]),
-  qjs_bun_new_int32: voidFn(["ptr", "i32", "buffer"]),
-  qjs_bun_new_int64: voidFn(["ptr", "i64", "buffer"]),
-  qjs_bun_new_uint32: voidFn(["ptr", "i32", "buffer"]),
-  qjs_bun_new_float64: voidFn(["ptr", "f64", "buffer"]),
-  qjs_bun_new_bigint64: voidFn(["ptr", "i64", "buffer"]),
-  qjs_bun_new_biguint64: voidFn(["ptr", "u64", "buffer"]),
-  qjs_bun_new_atom_string: voidFn(["ptr", "buffer", "buffer"]),
-  qjs_bun_atom_to_value: voidFn(["ptr", "u32", "buffer"]),
-  qjs_bun_atom_to_string: voidFn(["ptr", "u32", "buffer"]),
-  qjs_bun_to_string: voidFn(["ptr", "ptr", "buffer"]),
-  qjs_bun_to_property_key: voidFn(["ptr", "ptr", "buffer"]),
-  qjs_bun_get_class_proto: voidFn(["ptr", "u32", "buffer"]),
-  qjs_bun_new_object_proto: voidFn(["ptr", "ptr", "buffer"]),
-  qjs_bun_new_object_class: voidFn(["ptr", "i32", "buffer"]),
-  qjs_bun_new_object_proto_class: voidFn(["ptr", "ptr", "i32", "buffer"]),
-  qjs_bun_new_date: voidFn(["ptr", "buffer", "buffer"]),
-  qjs_bun_get_property: voidFn(["ptr", "ptr", "u32", "buffer"]),
-  qjs_bun_get_property_internal: voidFn(["ptr", "ptr", "u32", "ptr", "i32", "buffer"]),
-  qjs_bun_get_prototype: voidFn(["ptr", "ptr", "buffer"]),
-  qjs_bun_parse_json: voidFn(["ptr", "buffer", "buffer", usize, "buffer"]),
-  qjs_bun_parse_json2: voidFn(["ptr", "buffer", "buffer", usize, "buffer", "i32"]),
-  qjs_bun_json_stringify: voidFn(["ptr", "buffer", "ptr", "ptr", "ptr"]),
-  qjs_bun_new_array_buffer: voidFn(["ptr", "buffer", "ptr", usize, "ptr", "ptr", "i32"]),
-  qjs_bun_new_array_buffer_copy: voidFn(["ptr", "buffer", "buffer", usize]),
-  qjs_bun_new_typed_array: voidFn(["ptr", "buffer", "i32", "ptr", "i32"]),
-  qjs_bun_get_typed_array_buffer: voidFn(["ptr", "ptr", "ptr", "ptr", "ptr", "buffer"]),
-  qjs_bun_get_import_meta: voidFn(["ptr", "ptr", "buffer"]),
-  qjs_bun_get_module_namespace: voidFn(["ptr", "ptr", "buffer"]),
-  qjs_bun_load_module: voidFn(["ptr", "buffer", "buffer", "buffer"]),
-  qjs_bun_eval_function: voidFn(["ptr", "buffer", "ptr"]),
-  qjs_bun_new_c_function: voidFn(["ptr", "ptr", "buffer", "i32", "buffer"]),
-  qjs_bun_new_c_function_magic: voidFn(["ptr", "ptr", "buffer", "i32", "i32", "i32", "buffer"]),
-  qjs_bun_new_c_function2: voidFn(["ptr", "ptr", "buffer", "i32", "i32", "i32", "buffer"]),
-  qjs_bun_new_c_function_data: voidFn(["ptr", "buffer", "ptr", "i32", "i32", "i32", "ptr"]),
-  qjs_bun_get_module_private_value: voidFn(["ptr", "ptr", "buffer"]),
-  qjs_bun_get_own_property_names: fn(["ptr", "buffer", "buffer", "ptr", "i32"], "i32"),
-  qjs_bun_get_own_property: fn(["ptr", "buffer", "ptr", "u32"], "i32"),
-  qjs_bun_is_number: fn(["ptr"], "i32"),
-  qjs_bun_is_bigint: fn(["ptr", "ptr"], "i32"),
-  qjs_bun_is_bool: fn(["ptr"], "i32"),
-  qjs_bun_is_null: fn(["ptr"], "i32"),
-  qjs_bun_is_undefined: fn(["ptr"], "i32"),
-  qjs_bun_is_exception: fn(["ptr"], "i32"),
-  qjs_bun_is_uninitialized: fn(["ptr"], "i32"),
-  qjs_bun_is_string: fn(["ptr"], "i32"),
-  qjs_bun_is_symbol: fn(["ptr"], "i32"),
-  qjs_bun_is_object: fn(["ptr"], "i32"),
-  qjs_bun_is_live_object: fn(["ptr", "ptr"], "i32"),
-  qjs_bun_is_array: fn(["ptr", "ptr"], "i32"),
-  qjs_bun_is_error: fn(["ptr", "ptr"], "i32"),
-  qjs_bun_is_function: fn(["ptr", "ptr"], "i32"),
-  qjs_bun_is_constructor: fn(["ptr", "ptr"], "i32"),
-  qjs_bun_is_instance_of: fn(["ptr", "ptr", "ptr"], "i32"),
-  qjs_bun_promise_state: fn(["ptr", "ptr"], "i32"),
-  qjs_bun_set_property_str: fn(["ptr", "ptr", "buffer", "ptr"], "i32"),
-  qjs_bun_set_property_u32: fn(["ptr", "ptr", "u32", "ptr"], "i32"),
-  qjs_bun_set_property: fn(["ptr", "ptr", "u32", "ptr"], "i32"),
-  qjs_bun_set_property_internal: fn(["ptr", "ptr", "u32", "ptr", "ptr", "i32"], "i32"),
-  qjs_bun_set_property_i64: fn(["ptr", "ptr", "i64", "ptr"], "i32"),
-  qjs_bun_has_property: fn(["ptr", "ptr", "u32"], "i32"),
-  qjs_bun_delete_property: fn(["ptr", "ptr", "u32", "i32"], "i32"),
-  qjs_bun_is_extensible: fn(["ptr", "ptr"], "i32"),
-  qjs_bun_prevent_extensions: fn(["ptr", "ptr"], "i32"),
-  qjs_bun_set_prototype: fn(["ptr", "ptr", "ptr"], "i32"),
-  qjs_bun_set_constructor_bit: fn(["ptr", "ptr", "i32"], "i32"),
-  qjs_bun_set_constructor: fn(["ptr", "ptr", "ptr"], "i32"),
-  qjs_bun_strict_eq: fn(["ptr", "ptr", "ptr"], "i32"),
-  qjs_bun_same_value: fn(["ptr", "ptr", "ptr"], "i32"),
-  qjs_bun_same_value_zero: fn(["ptr", "ptr", "ptr"], "i32"),
-  qjs_bun_to_int32: fn(["ptr", "buffer", "ptr"], "i32"),
-  qjs_bun_to_uint32: fn(["ptr", "buffer", "ptr"], "i32"),
-  qjs_bun_to_int64: fn(["ptr", "buffer", "ptr"], "i32"),
-  qjs_bun_to_index: fn(["ptr", "buffer", "ptr"], "i32"),
-  qjs_bun_to_bigint64: fn(["ptr", "buffer", "ptr"], "i32"),
-  qjs_bun_to_int64_ext: fn(["ptr", "buffer", "ptr"], "i32"),
-  qjs_bun_define_property: fn(["ptr", "ptr", "u32", "ptr", "ptr", "ptr", "i32"], "i32"),
-  qjs_bun_define_property_value: fn(["ptr", "ptr", "u32", "ptr", "i32"], "i32"),
-  qjs_bun_define_property_value_u32: fn(["ptr", "ptr", "u32", "ptr", "i32"], "i32"),
-  qjs_bun_define_property_value_str: fn(["ptr", "ptr", "buffer", "ptr", "i32"], "i32"),
-  qjs_bun_define_property_get_set: fn(["ptr", "ptr", "u32", "ptr", "ptr", "i32"], "i32"),
-  qjs_bun_resolve_module: fn(["ptr", "ptr"], "i32"),
-  qjs_bun_set_property_function_list: fn(["ptr", "ptr", "ptr", "i32"], "i32"),
-  qjs_bun_set_module_export: fn(["ptr", "ptr", "buffer", "ptr"], "i32"),
-  qjs_bun_set_module_private_value: fn(["ptr", "ptr", "ptr"], "i32"),
-  qjs_bun_to_bool: fn(["ptr", "ptr"], "i32"),
-  qjs_bun_to_float64: fn(["ptr", "buffer", "ptr"], "i32"),
-  qjs_bun_get_class_id: fn(["ptr"], "u32"),
-  qjs_bun_value_to_atom: fn(["ptr", "ptr"], "u32"),
-  qjs_bun_value_get_norm_tag: fn(["ptr"], "i32"),
-  qjs_bun_value_is_nan: fn(["ptr"], "i32"),
-  qjs_bun_value_get_float64: fn(["ptr"], "f64"),
-  qjs_bun_to_cstring: fn(["ptr", "ptr"], "ptr"),
-  qjs_bun_to_cstring_len: fn(["ptr", "buffer", "ptr"], "ptr"),
-  qjs_bun_to_cstring_len2: fn(["ptr", "buffer", "ptr", "i32"], "ptr"),
-  qjs_bun_get_opaque: fn(["ptr", "u32"], "ptr"),
-  qjs_bun_get_opaque2: fn(["ptr", "ptr", "u32"], "ptr"),
-  qjs_bun_get_any_opaque: fn(["ptr", "buffer"], "ptr"),
-  qjs_bun_get_array_buffer: fn(["ptr", "buffer", "ptr"], "ptr"),
-  qjs_bun_write_object: fn(["ptr", "buffer", "ptr", "i32"], "ptr"),
-  qjs_bun_write_object2: fn(["ptr", "buffer", "ptr", "i32", "ptr", "ptr"], "ptr"),
-  qjs_bun_js_module_set_import_meta: fn(["ptr", "ptr", "i32", "i32"], "i32"),
-  qjs_bun_new_host_function: voidFn(["ptr", "ptr", "i32", "buffer"]),
-  qjs_bun_enqueue_host_job: fn(["ptr", "ptr", "i32", "u32", "ptr"], "i32"),
-  qjs_bun_mark_value: voidFn(["ptr", "ptr", "ptr"]),
-  qjs_bun_set_class_proto: voidFn(["ptr", "u32", "ptr"]),
-  qjs_bun_free_value: voidFn(["ptr", "ptr"]),
-  qjs_bun_free_value_rt: voidFn(["ptr", "ptr"]),
-  qjs_bun_detach_array_buffer: voidFn(["ptr", "ptr"]),
-  qjs_bun_set_is_html_dda: voidFn(["ptr", "ptr"]),
-  qjs_bun_set_opaque: voidFn(["ptr", "ptr"]),
-  qjs_bun_print_value_rt: voidFn(["ptr", "ptr", "ptr", "ptr", "ptr"]),
-  qjs_bun_print_value: voidFn(["ptr", "ptr", "ptr", "ptr", "ptr"]),
-  qjs_bun_print_value_options: voidFn([
-    "ptr",
-    "ptr",
-    "ptr",
-    "ptr",
-    "i32",
-    "i32",
-    "u32",
-    "u32",
-    "u32",
-  ]),
-  qjs_bun_dup_value: voidFn(["ptr", "ptr", "buffer"]),
-  qjs_bun_dup_value_rt: voidFn(["ptr", "ptr", "buffer"]),
-};
-
-function openNative(path: QuickJSPath | undefined) {
-  if (path) return dlopen(path, nativeSymbols);
-  if (process.platform === "win32") {
-    throw new Error("quickjs-bun on Windows requires a manually built native library path.");
-  }
-  return cc({
-    // NOTE(kenta): Bun supports a list of source files.
-    source: quickJSSources as unknown as string,
-    include: nativeInclude,
-    library: quickJSLibraries,
-    define: {
-      CONFIG_VERSION: `"${QUICKJS_VERSION_TEXT}"`,
-      NDEBUG: "1",
-      _GNU_SOURCE: "1",
-    },
-    symbols: nativeSymbols,
-  });
+export function cstring(text: string): Uint8Array {
+  assert(!text.includes("\0"), "string must not contain a NUL character");
+  return encoder.encode(`${text}\0`);
 }
 
-type QuickJSNativeLibrary = Library<typeof nativeSymbols>;
-export type QuickJSNative = QuickJSNativeLibrary["symbols"];
+export function bytes(view: JSBytes): Uint8Array {
+  if (!ArrayBuffer.isView(view)) return new Uint8Array(view);
+  return new Uint8Array(view.buffer, view.byteOffset, view.byteLength);
+}
+
+const symbols = {
+  JS_NewRuntime: { args: [], returns: "ptr" },
+  JS_FreeRuntime: { args: ["ptr"], returns: "void" },
+  qjs_bun_new_runtime: { args: [], returns: "ptr" },
+  qjs_bun_free_runtime: { args: ["ptr"], returns: "void" },
+  JS_SetRuntimeInfo: { args: ["ptr", "buffer"], returns: "void" },
+  JS_SetMemoryLimit: { args: ["ptr", "u64"], returns: "void" },
+  JS_SetGCThreshold: { args: ["ptr", "u64"], returns: "void" },
+  JS_SetMaxStackSize: { args: ["ptr", "u64"], returns: "void" },
+  JS_UpdateStackTop: { args: ["ptr"], returns: "void" },
+  JS_RunGC: { args: ["ptr"], returns: "void" },
+  JS_SetRuntimeOpaque: { args: ["ptr", "ptr"], returns: "void" },
+  JS_GetRuntimeOpaque: { args: ["ptr"], returns: "ptr" },
+  JS_ComputeMemoryUsage: { args: ["ptr", "buffer"], returns: "void" },
+  qjs_bun_dump_memory_usage: { args: ["ptr", "buffer"], returns: "ptr" },
+  JS_SetCanBlock: { args: ["ptr", "i32"], returns: "void" },
+  JS_SetStripInfo: { args: ["ptr", "i32"], returns: "void" },
+  JS_GetStripInfo: { args: ["ptr"], returns: "i32" },
+  JS_IsJobPending: { args: ["ptr"], returns: "i32" },
+  qjs_bun_execute_pending_job: { args: ["ptr", "f64", "buffer"], returns: "i32" },
+  JS_NewClassID: { args: ["buffer"], returns: "u32" },
+  JS_NewClass: { args: ["ptr", "u32", "ptr"], returns: "i32" },
+  qjs_bun_new_class: { args: ["ptr", "u32", "buffer", "ptr"], returns: "i32" },
+  JS_IsRegisteredClass: { args: ["ptr", "u32"], returns: "i32" },
+  qjs_bun_set_module_loader: { args: ["ptr", "ptr", "ptr"], returns: "void" },
+  qjs_bun_set_promise_rejection_tracker: { args: ["ptr", "ptr"], returns: "void" },
+  JS_SetInterruptHandler: { args: ["ptr", "ptr", "ptr"], returns: "void" },
+  JS_SetSharedArrayBufferFunctions: { args: ["ptr", "ptr"], returns: "void" },
+  JS_FreeAtomRT: { args: ["ptr", "u32"], returns: "void" },
+  qjs_bun_dup_value_rt: { args: ["ptr", "buffer", "ptr"], returns: "void" },
+  qjs_bun_free_value_rt: { args: ["ptr", "ptr"], returns: "void" },
+  qjs_bun_is_live_object: { args: ["ptr", "ptr"], returns: "i32" },
+  JS_NewContext: { args: ["ptr"], returns: "ptr" },
+  JS_NewContextRaw: { args: ["ptr"], returns: "ptr" },
+  JS_FreeContext: { args: ["ptr"], returns: "void" },
+  JS_DupContext: { args: ["ptr"], returns: "ptr" },
+  JS_GetRuntime: { args: ["ptr"], returns: "ptr" },
+  qjs_bun_new_context: { args: ["ptr", "i32", "f64"], returns: "ptr" },
+  qjs_bun_free_context: { args: ["ptr"], returns: "void" },
+  JS_SetContextOpaque: { args: ["ptr", "ptr"], returns: "void" },
+  JS_GetContextOpaque: { args: ["ptr"], returns: "ptr" },
+  qjs_bun_add_intrinsic: { args: ["ptr", "i32"], returns: "i32" },
+  JS_AddIntrinsicBaseObjects: { args: ["ptr"], returns: "i32" },
+  JS_AddIntrinsicDate: { args: ["ptr"], returns: "i32" },
+  JS_AddIntrinsicEval: { args: ["ptr"], returns: "i32" },
+  JS_AddIntrinsicStringNormalize: { args: ["ptr"], returns: "i32" },
+  JS_AddIntrinsicRegExpCompiler: { args: ["ptr"], returns: "void" },
+  JS_AddIntrinsicRegExp: { args: ["ptr"], returns: "i32" },
+  JS_AddIntrinsicJSON: { args: ["ptr"], returns: "i32" },
+  JS_AddIntrinsicProxy: { args: ["ptr"], returns: "i32" },
+  JS_AddIntrinsicMapSet: { args: ["ptr"], returns: "i32" },
+  JS_AddIntrinsicTypedArrays: { args: ["ptr"], returns: "i32" },
+  JS_AddIntrinsicPromise: { args: ["ptr"], returns: "i32" },
+  JS_AddIntrinsicWeakRef: { args: ["ptr"], returns: "i32" },
+  qjs_bun_get_global: { args: ["ptr", "buffer"], returns: "void" },
+  qjs_bun_get_class_proto: { args: ["ptr", "buffer", "u32"], returns: "void" },
+  qjs_bun_set_class_proto: { args: ["ptr", "u32", "ptr"], returns: "void" },
+  JS_GetScriptOrModuleName: { args: ["ptr", "i32"], returns: "u32" },
+  qjs_bun_eval: {
+    args: ["ptr", "buffer", "ptr", "buffer", "u64", "buffer", "i32", "f64"],
+    returns: "void",
+  },
+  qjs_bun_eval_function: { args: ["ptr", "buffer", "ptr", "f64"], returns: "void" },
+  qjs_bun_call: { args: ["ptr", "buffer", "ptr", "ptr", "u32", "ptr", "f64"], returns: "void" },
+  qjs_bun_invoke: { args: ["ptr", "buffer", "ptr", "u32", "u32", "ptr", "f64"], returns: "void" },
+  qjs_bun_call_constructor: {
+    args: ["ptr", "buffer", "ptr", "ptr", "u32", "ptr", "f64"],
+    returns: "void",
+  },
+  JS_DetectModule: { args: ["buffer", "u64"], returns: "i32" },
+  qjs_bun_parse_json: {
+    args: ["ptr", "buffer", "buffer", "u64", "buffer", "i32"],
+    returns: "void",
+  },
+  qjs_bun_json_stringify: { args: ["ptr", "buffer", "ptr", "ptr", "ptr"], returns: "void" },
+  qjs_bun_read_object: { args: ["ptr", "buffer", "buffer", "u64", "i32"], returns: "void" },
+  qjs_bun_write_object: { args: ["ptr", "buffer", "ptr", "i32"], returns: "ptr" },
+  qjs_bun_write_object2: { args: ["ptr", "buffer", "ptr", "i32", "ptr", "ptr"], returns: "ptr" },
+  qjs_bun_get_exception: { args: ["ptr", "buffer"], returns: "void" },
+  JS_HasException: { args: ["ptr"], returns: "i32" },
+  qjs_bun_throw: { args: ["ptr", "buffer", "ptr"], returns: "void" },
+  qjs_bun_throw_error: { args: ["ptr", "i32", "buffer"], returns: "void" },
+  qjs_bun_throw_out_of_memory: { args: ["ptr", "buffer"], returns: "void" },
+  JS_SetUncatchableException: { args: ["ptr", "i32"], returns: "void" },
+  qjs_bun_dup_value: { args: ["ptr", "buffer", "ptr"], returns: "void" },
+  qjs_bun_free_value: { args: ["ptr", "ptr"], returns: "void" },
+  qjs_bun_type: { args: ["ptr", "ptr"], returns: "i32" },
+  qjs_bun_get_class_id: { args: ["ptr"], returns: "u32" },
+  qjs_bun_new_string_len: { args: ["ptr", "buffer", "buffer", "u64"], returns: "void" },
+  qjs_bun_to_cstring_copy: { args: ["ptr", "ptr", "buffer", "u64"], returns: FFIType.i64_fast },
+  qjs_bun_to_cstring_len: { args: ["ptr", "buffer", "ptr", "i32"], returns: "ptr" },
+  JS_FreeCString: { args: ["ptr", "ptr"], returns: "void" },
+  qjs_bun_new_bigint64: { args: ["ptr", "buffer", "i64"], returns: "void" },
+  qjs_bun_new_biguint64: { args: ["ptr", "buffer", "u64"], returns: "void" },
+  qjs_bun_new_bigint128: { args: ["ptr", "buffer", "u64", "u64"], returns: "void" },
+  qjs_bun_to_bigint128: { args: ["ptr", "buffer", "buffer", "ptr"], returns: "i32" },
+  qjs_bun_new_symbol: { args: ["ptr", "buffer", "buffer", "i32"], returns: "void" },
+  qjs_bun_new_object: { args: ["ptr", "buffer"], returns: "void" },
+  qjs_bun_new_object_proto: { args: ["ptr", "buffer", "ptr"], returns: "void" },
+  qjs_bun_new_object_class: { args: ["ptr", "buffer", "i32"], returns: "void" },
+  qjs_bun_new_object_proto_class: { args: ["ptr", "buffer", "ptr", "i32"], returns: "void" },
+  qjs_bun_new_array: { args: ["ptr", "buffer"], returns: "void" },
+  qjs_bun_new_date: { args: ["ptr", "buffer", "f64"], returns: "void" },
+  qjs_bun_date_value: { args: ["ptr", "buffer", "ptr"], returns: "i32" },
+  qjs_bun_new_error: { args: ["ptr", "buffer"], returns: "void" },
+  qjs_bun_new_promise: { args: ["ptr", "buffer", "buffer"], returns: "void" },
+  qjs_bun_promise_state: { args: ["ptr", "ptr"], returns: "i32" },
+  qjs_bun_promise_result: { args: ["ptr", "buffer", "ptr"], returns: "void" },
+  qjs_bun_new_host_function: { args: ["ptr", "buffer", "ptr", "u32"], returns: "void" },
+  qjs_bun_enqueue_job: { args: ["ptr", "u32", "ptr"], returns: "i32" },
+  qjs_bun_new_atom_string: { args: ["ptr", "buffer", "buffer"], returns: "void" },
+  qjs_bun_to_object: { args: ["ptr", "buffer", "ptr"], returns: "void" },
+  qjs_bun_to_primitive: { args: ["ptr", "buffer", "ptr", "i32"], returns: "void" },
+  qjs_bun_to_string: { args: ["ptr", "buffer", "ptr"], returns: "void" },
+  qjs_bun_to_property_key: { args: ["ptr", "buffer", "ptr"], returns: "void" },
+  qjs_bun_to_bool: { args: ["ptr", "ptr"], returns: "i32" },
+  qjs_bun_to_float64: { args: ["ptr", "buffer", "ptr"], returns: "i32" },
+  qjs_bun_to_int32: { args: ["ptr", "buffer", "ptr"], returns: "i32" },
+  qjs_bun_to_int32_sat: { args: ["ptr", "buffer", "ptr"], returns: "i32" },
+  qjs_bun_to_uint32: { args: ["ptr", "buffer", "ptr"], returns: "i32" },
+  qjs_bun_to_int64: { args: ["ptr", "buffer", "ptr"], returns: "i32" },
+  qjs_bun_to_int64_ext: { args: ["ptr", "buffer", "ptr"], returns: "i32" },
+  qjs_bun_to_index: { args: ["ptr", "buffer", "ptr"], returns: "i32" },
+  qjs_bun_to_bigint64: { args: ["ptr", "buffer", "ptr"], returns: "i32" },
+  qjs_bun_strict_eq: { args: ["ptr", "ptr", "ptr"], returns: "i32" },
+  qjs_bun_same_value: { args: ["ptr", "ptr", "ptr"], returns: "i32" },
+  qjs_bun_same_value_zero: { args: ["ptr", "ptr", "ptr"], returns: "i32" },
+  qjs_bun_is_function: { args: ["ptr", "ptr"], returns: "i32" },
+  qjs_bun_is_constructor: { args: ["ptr", "ptr"], returns: "i32" },
+  qjs_bun_is_array: { args: ["ptr", "ptr"], returns: "i32" },
+  qjs_bun_is_error: { args: ["ptr", "ptr"], returns: "i32" },
+  qjs_bun_is_instance_of: { args: ["ptr", "ptr", "ptr"], returns: "i32" },
+  qjs_bun_ordinary_is_instance_of: { args: ["ptr", "ptr", "ptr"], returns: "i32" },
+  qjs_bun_set_constructor_bit: { args: ["ptr", "ptr", "i32"], returns: "i32" },
+  qjs_bun_set_constructor: { args: ["ptr", "ptr", "ptr"], returns: "i32" },
+  qjs_bun_set_is_html_dda: { args: ["ptr", "ptr"], returns: "void" },
+  qjs_bun_create_from_constructor: { args: ["ptr", "buffer", "ptr", "i32"], returns: "void" },
+  qjs_bun_get_property: { args: ["ptr", "buffer", "ptr", "u32"], returns: "void" },
+  qjs_bun_get_property_internal: {
+    args: ["ptr", "buffer", "ptr", "u32", "ptr", "i32"],
+    returns: "void",
+  },
+  qjs_bun_get_data_property: { args: ["ptr", "ptr", "u32", "buffer"], returns: "void" },
+  qjs_bun_get_property_u32: { args: ["ptr", "buffer", "ptr", "u32"], returns: "void" },
+  qjs_bun_set_property: { args: ["ptr", "ptr", "u32", "ptr"], returns: "i32" },
+  qjs_bun_set_property_internal: {
+    args: ["ptr", "ptr", "u32", "ptr", "ptr", "i32"],
+    returns: "i32",
+  },
+  qjs_bun_set_property_u32: { args: ["ptr", "ptr", "u32", "ptr"], returns: "i32" },
+  qjs_bun_set_property_i64: { args: ["ptr", "ptr", "i64", "ptr"], returns: "i32" },
+  qjs_bun_has_property: { args: ["ptr", "ptr", "u32"], returns: "i32" },
+  qjs_bun_delete_property: { args: ["ptr", "ptr", "u32", "i32"], returns: "i32" },
+  qjs_bun_define_property: {
+    args: ["ptr", "ptr", "u32", "ptr", "ptr", "ptr", "i32"],
+    returns: "i32",
+  },
+  qjs_bun_define_property_value: { args: ["ptr", "ptr", "u32", "ptr", "i32"], returns: "i32" },
+  qjs_bun_define_property_value_u32: { args: ["ptr", "ptr", "u32", "ptr", "i32"], returns: "i32" },
+  qjs_bun_define_property_get_set: {
+    args: ["ptr", "ptr", "u32", "ptr", "ptr", "i32"],
+    returns: "i32",
+  },
+  qjs_bun_get_own_property: { args: ["ptr", "buffer", "ptr", "u32"], returns: "i32" },
+  qjs_bun_get_own_property_names: {
+    args: ["ptr", "buffer", "buffer", "ptr", "i32"],
+    returns: "i32",
+  },
+  JS_FreePropertyEnum: { args: ["ptr", "ptr", "u32"], returns: "void" },
+  qjs_bun_own_keys: { args: ["ptr", "ptr", "i32", "buffer", "u64"], returns: FFIType.i64_fast },
+  qjs_bun_get_prototype: { args: ["ptr", "buffer", "ptr"], returns: "void" },
+  qjs_bun_set_prototype: { args: ["ptr", "ptr", "ptr"], returns: "i32" },
+  qjs_bun_is_extensible: { args: ["ptr", "ptr"], returns: "i32" },
+  qjs_bun_prevent_extensions: { args: ["ptr", "ptr"], returns: "i32" },
+  JS_NewAtomLen: { args: ["ptr", "buffer", "u64"], returns: "u32" },
+  JS_NewAtom: { args: ["ptr", "buffer"], returns: "u32" },
+  JS_NewAtomUInt32: { args: ["ptr", "u32"], returns: "u32" },
+  JS_DupAtom: { args: ["ptr", "u32"], returns: "u32" },
+  JS_FreeAtom: { args: ["ptr", "u32"], returns: "void" },
+  JS_AtomToCStringLen: { args: ["ptr", "buffer", "u32"], returns: "ptr" },
+  qjs_bun_atom_to_value: { args: ["ptr", "buffer", "u32"], returns: "void" },
+  qjs_bun_atom_to_string: { args: ["ptr", "buffer", "u32"], returns: "void" },
+  qjs_bun_value_to_atom: { args: ["ptr", "ptr"], returns: "u32" },
+  qjs_bun_get_opaque: { args: ["ptr", "u32"], returns: "ptr" },
+  qjs_bun_get_opaque2: { args: ["ptr", "ptr", "u32"], returns: "ptr" },
+  qjs_bun_get_any_opaque: { args: ["ptr", "buffer"], returns: "ptr" },
+  qjs_bun_set_opaque: { args: ["ptr", "ptr"], returns: "void" },
+  qjs_bun_new_array_buffer: {
+    args: ["ptr", "buffer", "ptr", "u64", "ptr", "u32"],
+    returns: "void",
+  },
+  qjs_bun_new_array_buffer_copy: { args: ["ptr", "buffer", "buffer", "u64"], returns: "void" },
+  qjs_bun_get_array_buffer: { args: ["ptr", "buffer", "ptr"], returns: "ptr" },
+  qjs_bun_detach_array_buffer: { args: ["ptr", "ptr"], returns: "void" },
+  qjs_bun_new_typed_array: { args: ["ptr", "buffer", "u32", "ptr", "i32"], returns: "void" },
+  qjs_bun_get_typed_array_buffer: {
+    args: ["ptr", "buffer", "ptr", "buffer", "buffer", "buffer"],
+    returns: "void",
+  },
+  qjs_bun_get_iterator: { args: ["ptr", "buffer", "ptr", "i32"], returns: "void" },
+  qjs_bun_iterator_next: { args: ["ptr", "buffer", "ptr", "ptr", "buffer"], returns: "void" },
+  qjs_bun_iterator_close: { args: ["ptr", "ptr", "i32"], returns: "i32" },
+  JS_NewCModule: { args: ["ptr", "buffer", "ptr"], returns: "ptr" },
+  JS_AddModuleExport: { args: ["ptr", "ptr", "buffer"], returns: "i32" },
+  qjs_bun_set_module_export: { args: ["ptr", "ptr", "buffer", "ptr"], returns: "i32" },
+  JS_GetModuleName: { args: ["ptr", "ptr"], returns: "u32" },
+  qjs_bun_get_import_meta: { args: ["ptr", "buffer", "ptr"], returns: "void" },
+  qjs_bun_get_module_namespace: { args: ["ptr", "buffer", "ptr"], returns: "void" },
+  qjs_bun_get_module_private_value: { args: ["ptr", "buffer", "ptr"], returns: "void" },
+  qjs_bun_set_module_private_value: { args: ["ptr", "ptr", "ptr"], returns: "i32" },
+  qjs_bun_resolve_module: { args: ["ptr", "ptr"], returns: "i32" },
+  qjs_bun_load_module: { args: ["ptr", "buffer", "buffer", "buffer"], returns: "void" },
+  qjs_bun_compile_module: { args: ["ptr", "buffer", "u64", "buffer"], returns: "ptr" },
+  qjs_bun_set_import_meta: { args: ["ptr", "ptr", "i32"], returns: "i32" },
+  qjs_bun_print: {
+    args: ["ptr", "ptr", "i32", "i32", "u32", "u32", "u32", "buffer"],
+    returns: "ptr",
+  },
+  qjs_bun_timeout_error: { args: ["ptr", "buffer"], returns: "void" },
+  qjs_bun_enter_scope: { args: ["ptr", "f64", "buffer"], returns: "void" },
+  qjs_bun_leave_scope: { args: ["ptr", "buffer"], returns: "i32" },
+  js_malloc: { args: ["ptr", "u64"], returns: "ptr" },
+  js_free: { args: ["ptr", "ptr"], returns: "void" },
+  js_malloc_rt: { args: ["ptr", "u64"], returns: "ptr" },
+  js_free_rt: { args: ["ptr", "ptr"], returns: "void" },
+} as const satisfies Record<string, FFIFunction>;
+
+export type QuickJSNative = Library<typeof symbols>["symbols"];
+export type QuickJSPath = string | URL;
+export interface QuickJSOptions {
+  path?: QuickJSPath;
+}
 
 export class QuickJS {
   readonly native: QuickJSNative;
-  #library: QuickJSNativeLibrary;
+  #library: Library<typeof symbols>;
+  #compiled?: Library<{ qjs_bun_symbol: { args: ["buffer"]; returns: "ptr" } }>;
   #closed = false;
-  #runtimes = new Map<string, JSRuntime>();
-  #hostSlotFinalizerCallback?: JSCallback;
 
   constructor(options: QuickJSOptions = {}) {
-    this.#library = openNative(options.path ?? process.env.QUICKJS_BUN_NATIVE_LIBRARY);
-    this.native = this.#library.symbols;
-  }
-
-  registerRuntime(runtime: JSRuntime): void {
-    this.#runtimes.set(String(runtime.ptr), runtime);
-  }
-
-  unregisterRuntime(runtime: JSRuntime): void {
-    this.#runtimes.delete(String(runtime.ptr));
-  }
-
-  ensureHostSlotFinalizer(): void {
-    if (this.#hostSlotFinalizerCallback) return;
-    this.#hostSlotFinalizerCallback = new JSCallback(
-      (rtPtr: Pointer | null, ctxPtr: Pointer | null, hostId: number) => {
-        if (rtPtr === null || ctxPtr === null) return;
-        const runtime = this.#runtimes.get(String(rtPtr));
-        runtime?.dispatchHostSlotFinalize(ctxPtr, hostId);
-      },
-      { args: ["ptr", "ptr", "u32"], returns: "void" },
-    );
-    if (this.#hostSlotFinalizerCallback.ptr === null) {
-      throw new Error("Host slot finalizer callback pointer is null");
+    const path = options.path ?? process.env.QUICKJS_BUN_NATIVE_LIBRARY;
+    if (path) {
+      this.#library = dlopen(path, symbols);
+    } else {
+      if (process.platform === "win32") {
+        throw new Error("quickjs-bun on Windows needs a prebuilt library; see the README");
+      }
+      const source = (file: string) => Bun.fileURLToPath(new URL(file, import.meta.url));
+      this.#compiled = cc({
+        source: [
+          source("./native/quickjs.c"),
+          source("../quickjs/cutils.c"),
+          source("../quickjs/libunicode.c"),
+          source("../quickjs/libregexp.c"),
+          source("../quickjs/dtoa.c"),
+          source("./native/alloca.S"),
+        ] as unknown as string,
+        include: [source("./native/"), source("../quickjs/")],
+        library: ["m"],
+        define: { CONFIG_VERSION: `"${QUICKJS_VERSION_TEXT}"`, NDEBUG: "1", _GNU_SOURCE: "1" },
+        symbols: { qjs_bun_symbol: { args: ["buffer"], returns: "ptr" } },
+      });
+      const linked: Record<string, FFIFunction> = {};
+      for (const [name, definition] of Object.entries(symbols)) {
+        const address = this.#compiled.symbols.qjs_bun_symbol(cstring(name));
+        assert(typeof address === "number", `quickjs-bun is missing the native symbol ${name}`);
+        linked[name] = { ...definition, ptr: address };
+      }
+      this.#library = linkSymbols(linked as unknown as typeof symbols);
     }
-    this.native.qjs_bun_set_host_slot_finalizer(this.#hostSlotFinalizerCallback.ptr);
+    this.native = this.#library.symbols;
   }
 
   close(): void {
     if (this.#closed) return;
     this.#closed = true;
-    if (this.#hostSlotFinalizerCallback) {
-      this.native.qjs_bun_set_host_slot_finalizer(null);
-      this.#hostSlotFinalizerCallback.close();
-      this.#hostSlotFinalizerCallback = undefined;
-    }
     this.#library.close();
+    this.#compiled?.close();
   }
 
   [Symbol.dispose](): void {

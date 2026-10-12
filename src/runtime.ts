@@ -1,85 +1,60 @@
 import assert from "node:assert/strict";
-import { CString, JSCallback, ptr, read, toArrayBuffer, type Pointer } from "bun:ffi";
-import { QUICKJS_DEFAULT_STACK_SIZE, type QuickJS, type QuickJSNative } from "./ffi";
+import { CString, JSCallback, read, toArrayBuffer, type Pointer } from "bun:ffi";
 import { JSContext } from "./context";
 import {
-  VALUE_CELL_BYTES,
-  bytesView,
-  encodeCString,
+  bytes,
+  cstring,
   encoder,
-  pointerKey,
-  throwQuickJSError,
-} from "./internal";
-import { JSModule } from "./module";
-import { JSValue } from "./value";
+  QUICKJS_DEFAULT_STACK_SIZE,
+  QuickJSValueTag,
+  type QuickJS,
+  type QuickJSNative,
+} from "./ffi";
 import type {
+  HostFunction,
+  JSClassOptions,
   JSContextOptions,
   JSMemoryUsage,
   JSModuleLoader,
+  JSModuleNormalizer,
   JSPromiseRejectionTracker,
   JSRuntimeOptions,
 } from "./types";
+import { JSException, JSModule, JSValue } from "./value";
 
 export class JSRuntime {
   readonly library: QuickJS;
   readonly native: QuickJSNative;
+  readonly contexts = new Map<Pointer, JSContext>();
+  readonly callbacks: JSCallback[] = [];
 
   #runtime: Pointer;
   #disposed = false;
-  #interruptCallback: JSCallback;
-  #interruptScopes: { own: number; effective: number }[] = [];
-  #interruptDeadlineMs = Number.POSITIVE_INFINITY;
-  #contexts = new Set<JSContext>();
-  #contextByPointer = new Map<string, JSContext>();
+  #hosts: (HostFunction | Uint8Array | undefined)[] = [];
+  #freeSlots: number[] = [];
+  #hostCallback: JSCallback;
   #moduleLoader?: JSModuleLoader;
-  #moduleLoaderCallback?: JSCallback;
-  #promiseRejectionTracker?: JSPromiseRejectionTracker;
-  #promiseRejectionTrackerCallback?: JSCallback;
+  #moduleNormalizer?: JSModuleNormalizer;
+  #loaderCallback?: JSCallback;
+  #normalizerCallback?: JSCallback;
+  #rejectionTracker?: JSPromiseRejectionTracker;
+  #rejectionCallback?: JSCallback;
   #runtimeInfo?: Uint8Array;
 
   constructor(options: JSRuntimeOptions) {
     const memoryBytes = options.memoryBytes ?? 64 * 1024 * 1024;
     const stackBytes = options.stackBytes ?? QUICKJS_DEFAULT_STACK_SIZE;
-    assert(
-      Number.isSafeInteger(memoryBytes) && memoryBytes > 0,
-      "memoryBytes must be a positive safe integer",
-    );
-    assert(
-      Number.isSafeInteger(stackBytes) && stackBytes > 0,
-      "stackBytes must be a positive safe integer",
-    );
-    if (options.gcThresholdBytes !== undefined) {
-      assert(
-        Number.isSafeInteger(options.gcThresholdBytes) && options.gcThresholdBytes >= 0,
-        "gcThresholdBytes must be a non-negative safe integer",
-      );
-    }
-    if (options.stripInfo !== undefined) {
-      assert(
-        Number.isSafeInteger(options.stripInfo) && options.stripInfo >= 0,
-        "stripInfo must be a non-negative safe integer",
-      );
-    }
-
+    assert(Number.isSafeInteger(memoryBytes) && memoryBytes > 0, "memoryBytes must be positive");
+    assert(Number.isSafeInteger(stackBytes) && stackBytes > 0, "stackBytes must be positive");
     this.library = options.library;
     this.native = this.library.native;
-
-    const runtime = this.native.JS_NewRuntime();
-    assert(runtime !== null, "QuickJS runtime did not initialize");
+    const runtime = this.native.qjs_bun_new_runtime();
+    assert(typeof runtime === "number", "QuickJS runtime did not initialize");
     this.#runtime = runtime;
-    this.library.registerRuntime(this);
-    this.library.ensureHostSlotFinalizer();
-    assert(
-      this.native.qjs_bun_init_host_slot_class(runtime) >= 0,
-      "qjs_bun_init_host_slot_class failed",
-    );
-
-    this.#interruptCallback = new JSCallback(() => this.#interrupt(), {
-      args: ["ptr", "ptr"],
-      returns: "i32",
+    this.#hostCallback = new JSCallback((request: Pointer) => this.#callHost(request), {
+      args: ["ptr"],
+      returns: "void",
     });
-    assert(this.#interruptCallback.ptr !== null, "Interrupt callback pointer is null");
-
     this.setMemoryLimit(memoryBytes);
     this.setMaxStackSize(stackBytes);
     if (options.gcThresholdBytes !== undefined) this.setGCThreshold(options.gcThresholdBytes);
@@ -93,110 +68,128 @@ export class JSRuntime {
     return this.#runtime;
   }
 
+  get hostCallback(): Pointer {
+    const pointer = this.#hostCallback.ptr;
+    assert(pointer !== null, "QuickJS host callback is closed");
+    return pointer;
+  }
+
+  slot(value: HostFunction | Uint8Array): number {
+    const id = this.#freeSlots.pop() ?? this.#hosts.length;
+    this.#hosts[id] = value;
+    return id;
+  }
+
+  release(id: number): void {
+    if (this.#hosts[id] === undefined) return;
+    this.#hosts[id] = undefined;
+    this.#freeSlots.push(id);
+  }
+
   createContext(options: JSContextOptions = {}): JSContext {
     return new JSContext(this, options);
   }
 
-  setModuleLoader(loader: JSModuleLoader | null): void {
+  setModuleLoader(loader: JSModuleLoader | null, normalizer?: JSModuleNormalizer): void {
     this.#moduleLoader = loader ?? undefined;
+    this.#moduleNormalizer = normalizer;
     if (loader === null) {
-      this.native.JS_SetModuleLoaderFunc(this.ptr, null, null, null);
-      this.#moduleLoaderCallback?.close();
-      this.#moduleLoaderCallback = undefined;
+      this.native.qjs_bun_set_module_loader(this.ptr, null, null);
       return;
     }
-    if (this.#moduleLoaderCallback === undefined) {
-      this.#moduleLoaderCallback = new JSCallback(
-        (context: Pointer, moduleName: Pointer, attributes: Pointer) =>
-          this.#loadModule(context, moduleName, attributes),
+    this.#loaderCallback ??= new JSCallback(
+      (context: Pointer, name: Pointer, attributes: Pointer) =>
+        this.#loadModule(context, name, attributes),
+      { args: ["ptr", "ptr", "ptr"], returns: "ptr" },
+    );
+    if (normalizer !== undefined) {
+      this.#normalizerCallback ??= new JSCallback(
+        (context: Pointer, base: Pointer, name: Pointer) =>
+          this.#normalizeModule(context, base, name),
         { args: ["ptr", "ptr", "ptr"], returns: "ptr" },
       );
-      assert(this.#moduleLoaderCallback.ptr !== null, "Module loader callback pointer is null");
     }
-    this.native.qjs_bun_set_module_loader_func2(this.ptr, this.#moduleLoaderCallback.ptr);
-  }
-
-  setPromiseRejectionTracker(tracker: JSPromiseRejectionTracker | null): void {
-    this.#promiseRejectionTracker = tracker ?? undefined;
-    if (tracker === null) {
-      this.native.qjs_bun_set_host_promise_rejection_tracker(this.ptr, null);
-      this.#promiseRejectionTrackerCallback?.close();
-      this.#promiseRejectionTrackerCallback = undefined;
-      return;
-    }
-    if (this.#promiseRejectionTrackerCallback === undefined) {
-      this.#promiseRejectionTrackerCallback = new JSCallback(
-        (context: Pointer, promise: Pointer, reason: Pointer, isHandled: number) =>
-          this.#trackPromiseRejection(context, promise, reason, isHandled),
-        { args: ["ptr", "ptr", "ptr", "i32"], returns: "void" },
-      );
-      assert(
-        this.#promiseRejectionTrackerCallback.ptr !== null,
-        "Promise rejection tracker callback pointer is null",
-      );
-    }
-    this.native.qjs_bun_set_host_promise_rejection_tracker(
+    this.native.qjs_bun_set_module_loader(
       this.ptr,
-      this.#promiseRejectionTrackerCallback.ptr,
+      this.#loaderCallback.ptr,
+      normalizer === undefined ? null : this.#normalizerCallback!.ptr,
     );
   }
 
-  getOpaque(): Pointer | null {
-    return this.native.JS_GetRuntimeOpaque(this.ptr) as Pointer | null;
-  }
-
-  setOpaque(opaque: Pointer | null): void {
-    this.native.JS_SetRuntimeOpaque(this.ptr, opaque);
+  setPromiseRejectionTracker(tracker: JSPromiseRejectionTracker | null): void {
+    this.#rejectionTracker = tracker ?? undefined;
+    if (tracker === null) {
+      this.native.qjs_bun_set_promise_rejection_tracker(this.ptr, null);
+      return;
+    }
+    this.#rejectionCallback ??= new JSCallback(
+      (context: Pointer, promise: Pointer, reason: Pointer, isHandled: number) =>
+        this.#trackRejection(context, promise, reason, isHandled),
+      { args: ["ptr", "ptr", "ptr", "i32"], returns: "void" },
+    );
+    this.native.qjs_bun_set_promise_rejection_tracker(this.ptr, this.#rejectionCallback.ptr);
   }
 
   newClassId(): number {
     return this.native.JS_NewClassID(new Uint32Array(1));
   }
 
-  registerClass(name: string, classId = this.newClassId()): number {
-    assert(Number.isSafeInteger(classId) && classId > 0, "classId must be a positive safe integer");
-    const className = encoder.encode(`${name}\0`);
-    assert(this.native.qjs_bun_new_class(this.ptr, classId, className) >= 0, "JS_NewClass failed");
+  registerClass(name: string, options: JSClassOptions & { classId?: number } = {}): number {
+    const classId = options.classId ?? this.newClassId();
+    assert(Number.isInteger(classId) && classId > 0, "classId must be a positive integer");
+    let finalizer: JSCallback | undefined;
+    if (options.finalizer !== undefined) {
+      const callback = options.finalizer;
+      finalizer = new JSCallback(
+        (opaque: Pointer | null) => {
+          try {
+            callback(opaque);
+          } catch {}
+        },
+        { args: ["ptr"], returns: "void" },
+      );
+      this.callbacks.push(finalizer);
+    }
+    const ok = this.native.qjs_bun_new_class(
+      this.ptr,
+      classId,
+      cstring(name),
+      finalizer?.ptr ?? null,
+    );
+    assert(ok >= 0, "JS_NewClass failed");
     return classId;
   }
 
   isRegisteredClass(classId: number): boolean {
-    assert(
-      Number.isSafeInteger(classId) && classId >= 0,
-      "classId must be a non-negative safe integer",
-    );
     return this.native.JS_IsRegisteredClass(this.ptr, classId) !== 0;
   }
 
-  dispatchHostSlotFinalize(contextPointer: Pointer, hostId: number): void {
-    if (this.#disposed) return;
-    const context = this.#contextByPointer.get(pointerKey(contextPointer));
-    context?.freeHostSlot(hostId);
+  getOpaque(): Pointer | null {
+    const opaque = this.native.JS_GetRuntimeOpaque(this.ptr);
+    return typeof opaque === "number" ? opaque : null;
+  }
+
+  setOpaque(opaque: Pointer | null): void {
+    this.native.JS_SetRuntimeOpaque(this.ptr, opaque);
   }
 
   setRuntimeInfo(info: string): void {
-    this.#runtimeInfo = encodeCString(info);
+    this.#runtimeInfo = cstring(info);
     this.native.JS_SetRuntimeInfo(this.ptr, this.#runtimeInfo);
   }
 
   setMemoryLimit(bytes: number): void {
-    assert(Number.isSafeInteger(bytes) && bytes > 0, "memoryBytes must be a positive safe integer");
+    assert(Number.isSafeInteger(bytes) && bytes > 0, "memoryBytes must be positive");
     this.native.JS_SetMemoryLimit(this.ptr, bytes);
   }
 
   setGCThreshold(bytes: number): void {
-    assert(
-      Number.isSafeInteger(bytes) && bytes >= 0,
-      "gcThresholdBytes must be a non-negative safe integer",
-    );
+    assert(Number.isSafeInteger(bytes) && bytes >= 0, "gcThresholdBytes must be non-negative");
     this.native.JS_SetGCThreshold(this.ptr, bytes);
   }
 
   setMaxStackSize(bytes: number): void {
-    assert(
-      Number.isSafeInteger(bytes) && bytes >= 0,
-      "stackBytes must be a non-negative safe integer",
-    );
+    assert(Number.isSafeInteger(bytes) && bytes >= 0, "stackBytes must be non-negative");
     this.native.JS_SetMaxStackSize(this.ptr, bytes);
   }
 
@@ -209,10 +202,7 @@ export class JSRuntime {
   }
 
   setStripInfo(flags: number): void {
-    assert(
-      Number.isSafeInteger(flags) && flags >= 0,
-      "stripInfo must be a non-negative safe integer",
-    );
+    assert(Number.isInteger(flags) && flags >= 0, "stripInfo must be non-negative");
     this.native.JS_SetStripInfo(this.ptr, flags);
   }
 
@@ -260,9 +250,9 @@ export class JSRuntime {
   dumpMemoryUsage(): string {
     const length = new BigUint64Array(1);
     const text = this.native.qjs_bun_dump_memory_usage(this.ptr, length);
-    assert(text !== null, "JS_DumpMemoryUsage failed");
+    assert(typeof text === "number", "JS_DumpMemoryUsage failed");
     try {
-      return length[0] === 0n ? "" : String(new CString(text, 0, Number(length[0]!)));
+      return new CString(text, 0, Number(length[0]!)) as string;
     } finally {
       this.native.js_free_rt(this.ptr, text);
     }
@@ -277,18 +267,14 @@ export class JSRuntime {
   }
 
   executePendingJob(timeoutMs = 1000): boolean {
-    const contextOut = new Uint8Array(8);
-    this.startInterrupt(timeoutMs);
-    const status = this.native.JS_ExecutePendingJob(this.ptr, contextOut);
-    const timedOut = this.endInterrupt();
-    if (status < 0) {
-      const contextPointer = read.ptr(ptr(contextOut)) as Pointer | null;
-      assert(contextPointer !== null, "QuickJS job context is null");
-      const context = this.#contextByPointer.get(pointerKey(contextPointer));
-      assert(context !== undefined, "QuickJS job context is not registered");
-      throw context.getException(timedOut);
-    }
-    return status > 0;
+    assert(Number.isFinite(timeoutMs) && timeoutMs > 0, "timeoutMs must be positive");
+    const out = new BigUint64Array(1);
+    const status = this.native.qjs_bun_execute_pending_job(this.ptr, timeoutMs, out);
+    if (status >= 0) return status > 0;
+    const context =
+      this.contexts.get(Number(out[0]!) as Pointer) ?? this.contexts.values().next().value;
+    assert(context !== undefined, "QuickJS job failed in a disposed context");
+    throw context.getException();
   }
 
   executePendingJobs(timeoutMs = 1000): number {
@@ -297,91 +283,97 @@ export class JSRuntime {
     return count;
   }
 
-  registerContext(context: JSContext): void {
-    this.#contexts.add(context);
-    this.#contextByPointer.set(pointerKey(context.ctx), context);
-  }
-
-  unregisterContext(context: JSContext): void {
-    this.#contexts.delete(context);
-    this.#contextByPointer.delete(pointerKey(context.ctx));
-  }
-
   dispose(): void {
     if (this.#disposed) return;
-    this.native.JS_SetModuleLoaderFunc(this.ptr, null, null, null);
-    this.native.qjs_bun_set_host_promise_rejection_tracker(this.ptr, null);
-    this.#moduleLoaderCallback?.close();
-    this.#moduleLoaderCallback = undefined;
-    this.#promiseRejectionTrackerCallback?.close();
-    this.#promiseRejectionTrackerCallback = undefined;
-    for (const context of this.#contexts) context.dispose();
-    this.library.unregisterRuntime(this);
+    for (const context of this.contexts.values()) context.dispose();
+    this.native.qjs_bun_free_runtime(this.#runtime);
     this.#disposed = true;
-    this.native.JS_FreeRuntime(this.#runtime);
-    this.#interruptCallback.close();
+    for (const callback of this.callbacks) callback.close();
+    this.callbacks.length = 0;
+    this.#hostCallback.close();
+    this.#loaderCallback?.close();
+    this.#normalizerCallback?.close();
+    this.#rejectionCallback?.close();
+    this.#hosts.length = 0;
+    this.#freeSlots.length = 0;
   }
 
   [Symbol.dispose](): void {
     this.dispose();
   }
 
-  startInterrupt(timeoutMs: number): void {
-    assert(Number.isFinite(timeoutMs) && timeoutMs > 0, "timeoutMs must be positive");
-    const own = performance.now() + timeoutMs;
-    const parent = this.#interruptScopes.at(-1);
-    const effective = parent === undefined ? own : Math.min(own, parent.effective);
-    this.#interruptScopes.push({ own, effective });
-    this.#interruptDeadlineMs = effective;
-    if (this.#interruptScopes.length === 1) {
-      this.native.JS_SetInterruptHandler(this.ptr, this.#interruptCallback.ptr, null);
+  #callHost(request: Pointer): void {
+    const id = read.u32(request, 4);
+    if (read.u32(request, 0) !== 0) {
+      this.release(id);
+      return;
     }
-  }
-
-  endInterrupt(): boolean {
-    const scope = this.#interruptScopes.pop();
-    const timedOut = scope !== undefined && performance.now() > scope.own;
-    const parent = this.#interruptScopes.at(-1);
-    this.#interruptDeadlineMs = parent === undefined ? Number.POSITIVE_INFINITY : parent.effective;
-    if (this.#interruptScopes.length === 0) {
-      this.native.JS_SetInterruptHandler(this.ptr, null, null);
+    const out = new Uint8Array(toArrayBuffer(request, 48, 16));
+    const pointer = read.ptr(request, 8) as Pointer;
+    const context = this.contexts.get(pointer);
+    const host = this.#hosts[id];
+    if (context === undefined || typeof host !== "function") {
+      this.native.qjs_bun_throw_error(pointer, 4, cstring("QuickJS host function is unavailable"));
+      out.fill(0);
+      out[8] = QuickJSValueTag.EXCEPTION;
+      return;
     }
-    return timedOut;
-  }
-
-  #interrupt(): number {
-    return performance.now() > this.#interruptDeadlineMs ? 1 : 0;
-  }
-
-  #loadModule(
-    contextPointer: Pointer,
-    moduleNamePointer: Pointer,
-    attributesPointer: Pointer,
-  ): Pointer | null {
-    const context = this.#contextByPointer.get(pointerKey(contextPointer));
-    if (context === undefined) {
-      throwQuickJSError(
-        this.native,
-        contextPointer,
-        "reference",
-        "QuickJS module context is not registered",
-      );
-      return null;
-    }
-    const moduleName = String(new CString(moduleNamePointer));
-    const attributes = new JSValue(
-      context,
-      new Uint8Array(toArrayBuffer(attributesPointer, 0, VALUE_CELL_BYTES)),
-      false,
-    );
+    const argc = read.u32(request, 16);
+    const thisValue = this.#borrow(context, request, 24);
+    const args: JSValue[] = [];
     try {
-      const source = this.#moduleLoader?.(moduleName, context, attributes);
+      const argv = read.ptr(request, 40) as Pointer;
+      for (let index = 0; index < argc; index++) args.push(this.#borrow(context, argv, index * 16));
+      const result = host.call(thisValue, ...args);
+      const handle = result instanceof JSValue ? result : context.newValue(result);
+      context.assertSameVM(handle);
+      if (handle.tag < 0) this.native.qjs_bun_dup_value(context.ctx, out, handle.ptr);
+      else out.set(handle.cell);
+      handle.dispose();
+    } catch (error) {
+      try {
+        const thrown =
+          error instanceof JSException
+            ? error.value
+            : error instanceof JSValue
+              ? error
+              : context.newError(error instanceof Error ? error : new Error(String(error)));
+        context.assertSameVM(thrown);
+        this.native.qjs_bun_throw(context.ctx, out, thrown.ptr);
+        thrown.dispose();
+      } catch (failure) {
+        if (failure instanceof JSException) failure.dispose();
+        this.native.qjs_bun_throw_out_of_memory(context.ctx, out);
+      }
+    } finally {
+      thisValue.dispose();
+      for (const arg of args) arg.dispose();
+    }
+  }
+
+  #borrow(context: JSContext, source: Pointer, offset: number): JSValue {
+    const cell = new Uint8Array(16);
+    cell.set(new Uint8Array(toArrayBuffer(source, offset, 16)));
+    const value = new JSValue(context, cell, true);
+    if (value.tag < 0) this.native.qjs_bun_dup_value(context.ctx, cell, value.ptr);
+    return value;
+  }
+
+  #loadModule(pointer: Pointer, name: Pointer, attributes: Pointer): Pointer | null {
+    const moduleName = new CString(name) as string;
+    try {
+      const context = this.contexts.get(pointer);
+      assert(context !== undefined, "QuickJS module context is not registered");
+      const source = this.#moduleLoader?.(
+        moduleName,
+        context,
+        new JSValue(context, new Uint8Array(toArrayBuffer(attributes, 0, 16)), false),
+      );
       if (source === null || source === undefined) {
-        throwQuickJSError(
-          this.native,
-          contextPointer,
-          "reference",
-          `Could not load module '${moduleName}'`,
+        this.native.qjs_bun_throw_error(
+          pointer,
+          2,
+          cstring(`Could not load module '${moduleName}'`),
         );
         return null;
       }
@@ -389,46 +381,52 @@ export class JSRuntime {
         assert(source.vm === context, "QuickJS module belongs to another context");
         return source.ptr;
       }
-      const bytes = typeof source === "string" ? encoder.encode(source) : bytesView(source);
-      const filename = encoder.encode(`${moduleName}\0`);
-      return this.native.qjs_bun_compile_module(
-        contextPointer,
-        bytes,
-        bytes.byteLength,
-        filename,
-      ) as Pointer | null;
-    } catch (error) {
-      throwQuickJSError(
-        this.native,
-        contextPointer,
-        "internal",
-        error instanceof Error ? error.message : String(error),
+      const code = Buffer.concat([
+        typeof source === "string" ? encoder.encode(source) : bytes(source),
+        Buffer.from([0]),
+      ]);
+      const module = this.native.qjs_bun_compile_module(
+        pointer,
+        code,
+        code.byteLength - 1,
+        cstring(moduleName),
       );
+      return typeof module === "number" ? module : null;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.native.qjs_bun_throw_error(pointer, 4, cstring(message));
       return null;
     }
   }
 
-  #trackPromiseRejection(
-    contextPointer: Pointer,
-    promisePointer: Pointer,
-    reasonPointer: Pointer,
-    isHandled: number,
-  ): void {
-    const context = this.#contextByPointer.get(pointerKey(contextPointer));
-    assert(context !== undefined, "QuickJS promise rejection context is not registered");
-    this.#promiseRejectionTracker?.({
-      context,
-      isHandled: isHandled !== 0,
-      promise: new JSValue(
+  #normalizeModule(pointer: Pointer, base: Pointer, name: Pointer): Pointer | null {
+    try {
+      const context = this.contexts.get(pointer);
+      assert(context !== undefined, "QuickJS module context is not registered");
+      const resolved = cstring(
+        this.#moduleNormalizer!(new CString(base) as string, new CString(name) as string, context),
+      );
+      const buffer = this.native.js_malloc(pointer, resolved.length);
+      assert(typeof buffer === "number", "QuickJS could not allocate the module name");
+      new Uint8Array(toArrayBuffer(buffer, 0, resolved.length)).set(resolved);
+      return buffer;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.native.qjs_bun_throw_error(pointer, 4, cstring(message));
+      return null;
+    }
+  }
+
+  #trackRejection(pointer: Pointer, promise: Pointer, reason: Pointer, isHandled: number): void {
+    try {
+      const context = this.contexts.get(pointer);
+      if (context === undefined) return;
+      this.#rejectionTracker?.({
         context,
-        new Uint8Array(toArrayBuffer(promisePointer, 0, VALUE_CELL_BYTES)),
-        false,
-      ),
-      reason: new JSValue(
-        context,
-        new Uint8Array(toArrayBuffer(reasonPointer, 0, VALUE_CELL_BYTES)),
-        false,
-      ),
-    });
+        isHandled: isHandled !== 0,
+        promise: new JSValue(context, new Uint8Array(toArrayBuffer(promise, 0, 16)), false),
+        reason: new JSValue(context, new Uint8Array(toArrayBuffer(reason, 0, 16)), false),
+      });
+    } catch {}
   }
 }
