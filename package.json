@@ -1,6 +1,6 @@
 {
   "name": "quickjs-bun",
-  "version": "0.1.2",
+  "version": "0.2.0",
   "description": "Lightweight, fully-featured, idiomatic bun:ffi bindings to QuickJS.",
   "keywords": [
     "bun",
@@ -33,15 +33,8 @@
     "src",
     "quickjs/LICENSE",
     "quickjs/VERSION",
-    "quickjs/cutils.*",
-    "quickjs/dtoa.*",
-    "quickjs/libregexp*",
-    "quickjs/libunicode*",
-    "quickjs/list.h",
-    "quickjs/quickjs.c",
-    "quickjs/quickjs.h",
-    "quickjs/quickjs-atom.h",
-    "quickjs/quickjs-opcode.h"
+    "quickjs/*.c",
+    "quickjs/*.h"
   ],
   "type": "module",
   "module": "index.ts",
@@ -56,11 +49,13 @@
     "access": "public"
   },
   "scripts": {
+    "build": "mkdir -p build && cc -O2 -shared -fPIC -DNDEBUG -D_GNU_SOURCE=1 -DCONFIG_VERSION=\"\\\"$(cat quickjs/VERSION)\\\"\" -Isrc/native -Iquickjs src/native/quickjs.c quickjs/cutils.c quickjs/libunicode.c quickjs/libregexp.c quickjs/dtoa.c src/native/alloca.S -lm -o build/quickjs-bun.$(bun -e 'console.log(require(\"bun:ffi\").suffix)')",
+    "fmt": "oxfmt",
+    "fmt:check": "oxfmt --check",
+    "lint": "oxlint",
     "stress": "bun scripts/stress.ts",
     "test": "bun test",
-    "lint": "oxlint",
-    "fmt": "oxfmt",
-    "fmt:check": "oxfmt --check"
+    "typecheck": "tsc --noEmit"
   },
   "dependencies": {},
   "devDependencies": {
@@ -71,6 +66,6 @@
     "typescript": "^5"
   },
   "engines": {
-    "bun": ">=1.3.14"
+    "bun": ">=1.4.0"
   }
 }
