@@ -83,6 +83,7 @@ export class JSContext {
   readonly null: JSValue;
   readonly true: JSValue;
   readonly false: JSValue;
+  readonly handles: JSValue[] = [];
   scratch = Buffer.allocUnsafe(4096);
 
   #context: Pointer;
@@ -698,6 +699,7 @@ export class JSContext {
 
   dispose(): void {
     if (this.#disposed) return;
+    while (this.handles.length > 0) this.handles[this.handles.length - 1]!.dispose();
     for (const atom of this.#atoms.values()) this.native.JS_FreeAtom(this.#context, atom);
     this.#atoms.clear();
     this.#disposed = true;

@@ -1445,6 +1445,24 @@ test("releases host function slots when the guest drops them", () => {
   expect(reused).toBeLessThanOrEqual(probe + 8);
 });
 
+test("releases handles that are still alive when the context is disposed", () => {
+  using runtime = new JSRuntime({ library });
+  const context = runtime.createContext();
+  const object = context.evalCode("({ a: [1, 2, 3] })");
+  const text = context.evalCode("'kept'");
+  const number = context.newNumber(1);
+  const disposed = context.evalCode("({})");
+  disposed.dispose();
+  expect(context.handles.length).toBe(2);
+  context.dispose();
+  expect(context.handles.length).toBe(0);
+  expect(() => object.ptr).toThrow("disposed");
+  expect(() => text.ptr).toThrow("disposed");
+  expect(number.toNumber()).toBe(1);
+  object.dispose();
+  text.dispose();
+});
+
 test("survives jobs that outlive their context", () => {
   using runtime = new JSRuntime({ library });
   using keeper = runtime.createContext();
