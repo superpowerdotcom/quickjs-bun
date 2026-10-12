@@ -209,14 +209,20 @@ export class JSContext {
   }
 
   newAtomUInt32(value: number): JSAtom {
-    assert(Number.isInteger(value) && value >= 0 && value <= 0xffffffff, "atom must be a uint32");
+    assert(
+      Number.isInteger(value) && value >= 0 && value <= 0xffffffff,
+      "atom value must be a uint32",
+    );
     const atom = this.native.JS_NewAtomUInt32(this.ctx, value);
     assert(atom !== QuickJSAtom.NULL, "QuickJS atom did not initialize");
     return new JSAtom(this, atom, true);
   }
 
   getScriptOrModuleName(stackLevels = 0): JSAtom | null {
-    assert(Number.isInteger(stackLevels) && stackLevels >= 0, "stackLevels must be non-negative");
+    assert(
+      Number.isInteger(stackLevels) && stackLevels >= 0,
+      "stackLevels must be a non-negative safe integer",
+    );
     const atom = this.native.JS_GetScriptOrModuleName(this.ctx, stackLevels);
     return atom === QuickJSAtom.NULL ? null : new JSAtom(this, atom, true);
   }
