@@ -1604,6 +1604,44 @@ test("refuses to dispose a runtime or a context from inside a host function", ()
   expect(after.toNumber()).toBe(2);
 });
 
+test("interrupts guests that swallow the interrupt in async functions or host calls", () => {
+  using runtime = new JSRuntime({ library });
+  using context = runtime.createContext({ timeoutMs: 50 });
+  using nested = context.newFunction(() => {
+    try {
+      context.evalCode("while (true) {}", { timeoutMs: 5000 }).dispose();
+    } catch (error) {
+      if (error instanceof JSException) error.dispose();
+    }
+  });
+  context.setGlobal("nested", nested);
+  for (const code of [
+    "for (;;) { (async () => { for (;;) {} })() }",
+    "for (;;) { try { nested() } catch {} }",
+  ]) {
+    const started = performance.now();
+    expect(() => context.evalCode(code)).toThrow("QuickJS execution timed out");
+    expect(performance.now() - started).toBeLessThan(2000);
+  }
+  using spun = context.evalCode("(async () => { for (;;) {} })()");
+  expect(spun.promiseState).toBe(QuickJSPromiseState.REJECTED);
+});
+
+test("rejects interrupted promise jobs instead of leaving them pending", () => {
+  using runtime = new JSRuntime({ library });
+  using context = runtime.createContext({ timeoutMs: 50 });
+  const reasons: string[] = [];
+  runtime.setPromiseRejectionTracker((rejection) => {
+    reasons.push(rejection.reason.toError().message);
+  });
+  using chained = context.evalCode("Promise.resolve().then(() => { while (true) {} })");
+  using spun = context.evalCode("(async () => { await null; while (true) {} })()");
+  expect(runtime.executePendingJobs(20)).toBe(2);
+  expect(chained.promiseState).toBe(QuickJSPromiseState.REJECTED);
+  expect(spun.promiseState).toBe(QuickJSPromiseState.REJECTED);
+  expect(reasons).toEqual(["interrupted", "interrupted"]);
+});
+
 test("rejects direct and indirect eval flags", () => {
   using context = vm();
   expect(() => context.evalCode("1", { flags: QuickJSEvalFlags.TYPE_DIRECT })).toThrow(
