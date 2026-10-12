@@ -75,9 +75,14 @@ static QJSBunRuntime *qjs_bun_state(JSRuntime *rt) {
 static double qjs_bun_timeout(JSContext *ctx) {
   QJSBunRuntime *state = qjs_bun_state(ctx->rt);
   if (state)
-    for (QJSBunContext *entry = state->contexts; entry; entry = entry->next)
-      if (entry->ctx == ctx)
+    for (QJSBunContext **link = &state->contexts; *link; link = &(*link)->next)
+      if ((*link)->ctx == ctx) {
+        QJSBunContext *entry = *link;
+        *link = entry->next;
+        entry->next = state->contexts;
+        state->contexts = entry;
         return entry->timeout_ms;
+      }
   return INFINITY;
 }
 

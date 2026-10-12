@@ -138,6 +138,8 @@ QUICKJS_BUN_NATIVE_LIBRARY=$PWD/build/quickjs-bun.dylib bun start
 
 The equivalent command line is in `package.json`; any C11 compiler works (`cc`, `clang`, `gcc`, `zig cc`), including cross compilation for Linux glibc, musl, and Windows. `new QuickJS({ path })` loads a specific file.
 
+Guest code runs on the calling thread, so every call blocks the event loop for as long as it runs, up to its `timeoutMs`. A server that must keep serving while sandboxes run should give each runtime its own `Worker`.
+
 `bun scripts/stress.ts` on a 10-core Apple Silicon machine with Bun 1.4.3 (the machine was not idle, so treat these as a floor):
 
 | Measurement                                | TinyCC | `bun run build` |
@@ -147,7 +149,7 @@ The equivalent command line is in `package.json`; any C11 compiler works (`cc`, 
 | evaluations per second, 256 VMs, 1 thread  | 20,100 |         120,500 |
 | evaluations per second, 256 VMs, 4 workers | 50,300 |         234,200 |
 
-Per-operation costs with the optimized build: creating a runtime with a context takes about 40 µs, a guest function call from the host about 90 ns, reading a property 55 ns, a host function round trip 0.4 µs, converting a small object either way about 1 µs, and `evalCode("1 + 2")` about 1 µs.
+Per-operation costs with the optimized build: creating a runtime with a context takes about 40 µs, a guest function call from the host about 90 ns, reading a property 55 ns, a host function round trip 0.35 µs, converting a small object either way about 1 µs, and `evalCode("1 + 2")` about 1 µs.
 
 ## Vendored QuickJS
 
@@ -160,6 +162,7 @@ Per-operation costs with the optimized build: creating a runtime with a context 
 - A `JSException` owns its guest value; dispose it when you are done, or read `.name`, `.message`, and `.stack`, which are copied eagerly.
 - `TimeoutError` is raised when the deadline of the call you made expires. Code interrupted inside an async function surfaces as a rejected promise whose reason is `InternalError: interrupted`.
 - Close the `QuickJS` library only after every runtime is disposed.
+- Disposing a context releases its heap at the next `runtime.runGC()` or when the runtime is disposed, because the global object sits in a reference cycle. A runtime that outlives many contexts should run the GC after disposing each one.
 - Lone surrogates survive both directions (`newString`, `newValue`, `toString`, `keys`, atoms); C strings handed to QuickJS by name (filenames, module and symbol names) must be well-formed.
 
 ## Examples
