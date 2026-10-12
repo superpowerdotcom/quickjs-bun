@@ -149,6 +149,8 @@ Guest code runs on the calling thread, so every call blocks the event loop for a
 | evaluations per second, 256 VMs, 1 thread  | 20,100 |         120,500 |
 | evaluations per second, 256 VMs, 4 workers | 50,300 |         234,200 |
 
+The same script on Linux arm64 (Alpine in Docker, 10 CPUs, Bun 1.4.3) measured 42,000 / 46,000 / 124,000 evaluations per second with TinyCC and 103,000 / 226,000 / 545,000 with a gcc build.
+
 Per-operation costs with the optimized build: creating a runtime with a context takes about 40 µs, a guest function call from the host about 90 ns, reading a property 55 ns, a host function round trip 0.35 µs, converting a small object either way about 1 µs, and `evalCode("1 + 2")` about 1 µs.
 
 ## Vendored QuickJS
