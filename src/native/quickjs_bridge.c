@@ -185,9 +185,10 @@ static void qjs_bun_host_finalizer(JSRuntime *rt, JSValue val) {
 }
 
 static void qjs_bun_array_buffer_free(JSRuntime *rt, void *opaque, void *ptr) {
+  if (!ptr)
+    return;
   QJSBunHostSlot *slot = opaque;
   QJSBunHostRequest request = {1, slot->host_id, NULL, 0, 0, JS_UNDEFINED, NULL, JS_UNDEFINED};
-  (void)ptr;
   slot->callback(&request);
   js_free_rt(rt, slot);
 }
@@ -477,6 +478,10 @@ void qjs_bun_new_host_function(JSContext *ctx, JSValue *out, QJSBunHostCallback 
   slot->host_id = host_id;
   JS_SetOpaque(fn, slot);
   js_function_set_properties(ctx, fn, JS_ATOM_empty_string, 0);
+  if (JS_HasException(ctx)) {
+    JS_FreeValue(ctx, fn);
+    fn = JS_EXCEPTION;
+  }
   *out = fn;
 }
 
@@ -650,6 +655,7 @@ void qjs_bun_throw_error(JSContext *ctx, int kind, const char *message) {
 }
 
 void qjs_bun_get_data_property(JSContext *ctx, const JSValue *obj, uint32_t atom, JSValue *out) {
+  QJSBunScope scope = qjs_bun_enter(ctx->rt, qjs_bun_timeout(ctx));
   *out = JS_UNDEFINED;
   JSValue current = JS_DupValue(ctx, *obj);
   for (;;) {
@@ -679,6 +685,7 @@ void qjs_bun_get_data_property(JSContext *ctx, const JSValue *obj, uint32_t atom
       break;
   }
   JS_FreeValue(ctx, current);
+  qjs_bun_leave(ctx, scope, JS_IsException(*out));
 }
 
 QJS_OUT(qjs_bun_get_exception, (JSContext * ctx, JSValue *out), JS_GetException(ctx))
@@ -719,7 +726,7 @@ QJS_RET(int, qjs_bun_strict_eq, (JSContext * ctx, const JSValue *a, const JSValu
 QJS_RET(int, qjs_bun_same_value, (JSContext * ctx, const JSValue *a, const JSValue *b), JS_SameValue(ctx, *a, *b))
 QJS_RET(int, qjs_bun_same_value_zero, (JSContext * ctx, const JSValue *a, const JSValue *b), JS_SameValueZero(ctx, *a, *b))
 QJS_RET(int, qjs_bun_set_constructor_bit, (JSContext * ctx, const JSValue *fn, int v), JS_SetConstructorBit(ctx, *fn, v))
-QJS_RET(int, qjs_bun_set_constructor, (JSContext * ctx, const JSValue *fn, const JSValue *proto), JS_SetConstructor(ctx, *fn, *proto))
+QJS_GUEST_RET(qjs_bun_set_constructor, (JSContext * ctx, const JSValue *fn, const JSValue *proto), JS_SetConstructor(ctx, *fn, *proto))
 void qjs_bun_set_is_html_dda(JSContext *ctx, const JSValue *obj) { JS_SetIsHTMLDDA(ctx, *obj); }
 QJS_RET(void *, qjs_bun_get_opaque, (const JSValue *obj, uint32_t class_id), JS_GetOpaque(*obj, class_id))
 QJS_RET(void *, qjs_bun_get_opaque2, (JSContext * ctx, const JSValue *obj, uint32_t class_id), JS_GetOpaque2(ctx, *obj, class_id))
@@ -727,7 +734,12 @@ QJS_RET(void *, qjs_bun_get_any_opaque, (const JSValue *obj, uint32_t *class_id)
 void qjs_bun_set_opaque(const JSValue *obj, void *opaque) { JS_SetOpaque(*obj, opaque); }
 QJS_OUT(qjs_bun_atom_to_value, (JSContext * ctx, JSValue *out, uint32_t atom), JS_AtomToValue(ctx, atom))
 QJS_OUT(qjs_bun_atom_to_string, (JSContext * ctx, JSValue *out, uint32_t atom), JS_AtomToString(ctx, atom))
-QJS_RET(uint32_t, qjs_bun_value_to_atom, (JSContext * ctx, const JSValue *v), JS_ValueToAtom(ctx, *v))
+uint32_t qjs_bun_value_to_atom(JSContext *ctx, const JSValue *v) {
+  QJSBunScope scope = qjs_bun_enter(ctx->rt, qjs_bun_timeout(ctx));
+  JSAtom atom = JS_ValueToAtom(ctx, *v);
+  qjs_bun_leave(ctx, scope, atom == JS_ATOM_NULL);
+  return atom;
+}
 QJS_RET(const char *, qjs_bun_to_cstring_len, (JSContext * ctx, uint64_t *len, const JSValue *v, int cesu8), JS_ToCStringLen2(ctx, (size_t *)len, *v, cesu8))
 QJS_OUT(qjs_bun_parse_json, (JSContext * ctx, JSValue *out, const uint8_t *s, uint64_t len, const char *filename, int flags), JS_ParseJSON2(ctx, (const char *)s, (size_t)len, filename, flags))
 QJS_OUT(qjs_bun_read_object, (JSContext * ctx, JSValue *out, const uint8_t *s, uint64_t len, int flags), JS_ReadObject(ctx, s, (size_t)len, flags))

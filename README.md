@@ -14,7 +14,7 @@ Running untrusted JavaScript inside a Bun process usually means Node-API wrapper
 
 ## Requirements
 
-Bun 1.4 or newer. macOS and Linux (x86_64 and aarch64) need no build tools: the C sources compile at `new QuickJS()`. Windows needs a prebuilt library (see below).
+Bun 1.4 or newer. On macOS and Linux (x86_64 and aarch64) the C sources compile at `new QuickJS()` with Bun's embedded TinyCC, which only needs the C library headers (`apk add musl-dev` on Alpine, `apt-get install libc6-dev` on Debian; macOS has them). Windows, and any machine without headers, needs a prebuilt library (see below).
 
 ```bash
 bun add quickjs-bun
@@ -149,7 +149,7 @@ Per-operation costs with the optimized build: creating a runtime with a context 
 
 ## Vendored QuickJS
 
-`quickjs/` holds the engine sources from [bellard/quickjs](https://github.com/bellard/quickjs) at commit `9d01a96` (release `2026-06-04` plus upstream fixes). Three local changes are applied on top; search `quickjs/quickjs.c` for `JS_DupValue(ctx, error_obj)` (`build_backtrace` keeps the error alive while it runs, fixing a use-after-free under memory pressure), `!defined(__TINYC__)` (Atomics are skipped under TinyCC, which has no `stdatomic.h`; optimized builds compile them and the bindings delete the global), and `malloc_limit = (size_t)-1` (`JS_ThrowOutOfMemory` can always allocate its error). To upgrade, copy the files listed under `files` in `package.json` from the new upstream commit, reapply those changes, update `quickjs/VERSION` if upstream did, and run `bun test` plus `bun run build && QUICKJS_BUN_NATIVE_LIBRARY=$PWD/build/quickjs-bun.* bun test`.
+`quickjs/` holds the engine sources from [bellard/quickjs](https://github.com/bellard/quickjs) at commit `9d01a96` (release `2026-06-04` plus upstream fixes). Four local changes are applied on top; search `quickjs/quickjs.c` for `JS_DupValue(ctx, error_obj)` (`build_backtrace` keeps the error alive while it runs, fixing a use-after-free under memory pressure), `!defined(__TINYC__)` (Atomics are skipped under TinyCC, which has no `stdatomic.h`; optimized builds compile them and the bindings delete the global), `malloc_limit = (size_t)-1` (`JS_ThrowOutOfMemory` can always allocate its error), and `JSDefMallocHeader` (the default allocator records block sizes itself instead of calling `malloc_usable_size`, which crashes under TinyCC on Linux because Bun's bundled allocator and libc disagree, and makes memory accounting identical on every platform). To upgrade, copy the files listed under `files` in `package.json` from the new upstream commit, reapply those changes, update `quickjs/VERSION` if upstream did, and run `bun test` plus `bun run build && QUICKJS_BUN_NATIVE_LIBRARY=$PWD/build/quickjs-bun.* bun test`.
 
 ## Gotchas
 
@@ -158,6 +158,7 @@ Per-operation costs with the optimized build: creating a runtime with a context 
 - A `JSException` owns its guest value; dispose it when you are done, or read `.name`, `.message`, and `.stack`, which are copied eagerly.
 - `TimeoutError` is raised when the deadline of the call you made expires. Code interrupted inside an async function surfaces as a rejected promise whose reason is `InternalError: interrupted`.
 - Close the `QuickJS` library only after every runtime is disposed.
+- Lone surrogates survive both directions (`newString`, `newValue`, `toString`, `keys`, atoms); C strings handed to QuickJS by name (filenames, module and symbol names) must be well-formed.
 
 ## Examples
 

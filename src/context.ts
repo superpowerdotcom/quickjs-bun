@@ -182,12 +182,14 @@ export class JSContext {
     }
     let atom = this.#atoms.get(key);
     if (atom === undefined) {
-      if (this.#atoms.size >= 4096) {
+      if (this.#atoms.size >= 4096 && this.runtime.hostDepth === 0) {
         for (const cached of this.#atoms.values()) this.native.JS_FreeAtom(this.ctx, cached);
         this.#atoms.clear();
       }
       const text = encoder.encode(key);
-      atom = this.native.JS_NewAtomLen(this.ctx, text, text.length);
+      atom = key.isWellFormed()
+        ? this.native.JS_NewAtomLen(this.ctx, text, text.length)
+        : this.newAtom(key).value;
       assert(atom !== QuickJSAtom.NULL, "QuickJS atom did not initialize");
       this.#atoms.set(key, atom);
     }
@@ -196,6 +198,10 @@ export class JSContext {
 
   newAtom(value: string | number): JSAtom {
     if (typeof value === "number") return this.newAtomUInt32(value);
+    if (!value.isWellFormed()) {
+      using text = this.newString(value);
+      return text.toAtom();
+    }
     const text = encoder.encode(value);
     const atom = this.native.JS_NewAtomLen(this.ctx, text, text.length);
     assert(atom !== QuickJSAtom.NULL, "QuickJS atom did not initialize");
@@ -365,6 +371,7 @@ export class JSContext {
   }
 
   newString(value: string): JSValue {
+    if (!value.isWellFormed()) return this.parseJson(JSON.stringify(value));
     const text = encoder.encode(value);
     const out = new Uint8Array(16);
     this.native.qjs_bun_new_string_len(this.ctx, out, text, text.length);
@@ -481,6 +488,7 @@ export class JSContext {
 
   newArrayBuffer(data: JSBytes): JSValue {
     const view = bytes(data);
+    if (view.byteLength === 0) return this.newArrayBufferCopy(view);
     const id = this.runtime.slot(view);
     const out = new Uint8Array(16);
     this.native.qjs_bun_new_array_buffer(

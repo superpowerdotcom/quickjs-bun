@@ -27,6 +27,7 @@ export class JSRuntime {
   readonly native: QuickJSNative;
   readonly contexts = new Map<Pointer, JSContext>();
   readonly callbacks: JSCallback[] = [];
+  hostDepth = 0;
 
   #runtime: Pointer;
   #disposed = false;
@@ -321,6 +322,7 @@ export class JSRuntime {
     const argc = read.u32(request, 16);
     const thisValue = this.#borrow(context, request, 24);
     const args: JSValue[] = [];
+    this.hostDepth++;
     try {
       const argv = read.ptr(request, 40) as Pointer;
       for (let index = 0; index < argc; index++) args.push(this.#borrow(context, argv, index * 16));
@@ -343,9 +345,16 @@ export class JSRuntime {
         thrown.dispose();
       } catch (failure) {
         if (failure instanceof JSException) failure.dispose();
-        this.native.qjs_bun_throw_out_of_memory(context.ctx, out);
+        if (context.disposed) {
+          this.native.qjs_bun_throw_error(pointer, 4, cstring("QuickJS context is disposed"));
+          out.fill(0);
+          out[8] = QuickJSValueTag.EXCEPTION;
+        } else {
+          this.native.qjs_bun_throw_out_of_memory(context.ctx, out);
+        }
       }
     } finally {
+      this.hostDepth--;
       thisValue.dispose();
       for (const arg of args) arg.dispose();
     }
