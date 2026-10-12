@@ -22,6 +22,11 @@ import type {
 } from "./types";
 import { JSException, JSModule, JSValue } from "./value";
 
+const cell = new Uint8Array(16);
+const cellInt32 = new Int32Array(cell.buffer);
+const exception = new Uint8Array(16);
+exception[8] = QuickJSValueTag.EXCEPTION;
+
 export class JSRuntime {
   readonly library: QuickJS;
   readonly native: QuickJSNative;
@@ -325,14 +330,13 @@ export class JSRuntime {
       this.release(id);
       return;
     }
-    const out = new Uint8Array(toArrayBuffer(request, 48, 16));
+    const out = (request + 48) as Pointer;
     const pointer = read.ptr(request, 8) as Pointer;
     const context = this.contexts.get(pointer);
     const host = this.#hosts[id];
     if (context === undefined || typeof host !== "function") {
       this.native.qjs_bun_throw_error(pointer, 4, cstring("QuickJS host function is unavailable"));
-      out.fill(0);
-      out[8] = QuickJSValueTag.EXCEPTION;
+      this.native.qjs_bun_dup_value(pointer, out, exception);
       return;
     }
     const argc = read.u32(request, 16);
@@ -345,8 +349,7 @@ export class JSRuntime {
       const result = host.call(thisValue, ...args);
       const handle = result instanceof JSValue ? result : context.newValue(result);
       context.assertSameVM(handle);
-      if (handle.tag < 0) this.native.qjs_bun_dup_value(context.ctx, out, handle.ptr);
-      else out.set(handle.cell);
+      this.native.qjs_bun_dup_value(context.ctx, out, handle.ptr);
       handle.dispose();
     } catch (error) {
       try {
@@ -363,8 +366,7 @@ export class JSRuntime {
         if (failure instanceof JSException) failure.dispose();
         if (context.disposed) {
           this.native.qjs_bun_throw_error(pointer, 4, cstring("QuickJS context is disposed"));
-          out.fill(0);
-          out[8] = QuickJSValueTag.EXCEPTION;
+          this.native.qjs_bun_dup_value(pointer, out, exception);
         } else {
           this.native.qjs_bun_throw_out_of_memory(context.ctx, out);
         }
@@ -377,10 +379,13 @@ export class JSRuntime {
   }
 
   #borrow(context: JSContext, source: Pointer, offset: number): JSValue {
-    const cell = new Uint8Array(16);
-    cell.set(new Uint8Array(toArrayBuffer(source, offset, 16)));
-    const value = new JSValue(context, cell, true);
-    if (value.tag < 0) this.native.qjs_bun_dup_value(context.ctx, cell, value.ptr);
+    cellInt32[0] = read.i32(source, offset);
+    cellInt32[1] = read.i32(source, offset + 4);
+    cellInt32[2] = read.i32(source, offset + 8);
+    cellInt32[3] = cellInt32[2]! >> 31;
+    const copy = cell.slice();
+    const value = new JSValue(context, copy, true);
+    if (value.tag < 0) this.native.qjs_bun_dup_value(context.ctx, copy, value.ptr);
     return value;
   }
 

@@ -41,13 +41,19 @@ const intrinsics: readonly JSIntrinsic[] = [
   "weakRef",
 ];
 
+const cell = new Uint8Array(16);
+const cellInt32 = new Int32Array(cell.buffer);
+const cellFloat64 = new Float64Array(cell.buffer);
+
 function primitive(tag: number, value: number): Uint8Array {
-  const cell = new Uint8Array(16);
-  const view = new DataView(cell.buffer);
-  if (tag === QuickJSValueTag.FLOAT64) view.setFloat64(0, value, true);
-  else view.setInt32(0, value, true);
-  view.setInt32(8, tag, true);
-  return cell;
+  if (tag === QuickJSValueTag.FLOAT64) cellFloat64[0] = value;
+  else {
+    cellInt32[0] = value;
+    cellInt32[1] = 0;
+  }
+  cellInt32[2] = tag;
+  cellInt32[3] = 0;
+  return cell.slice();
 }
 
 function argv(args: readonly JSValue[]): Uint8Array | null {
