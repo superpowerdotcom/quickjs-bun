@@ -48,7 +48,7 @@ vm.evalCode("(function f() { return f() + 1 })()"); // throws InternalError: sta
 
 `timeoutMs` applies to every operation that can run guest code: evaluation, calls, property access, coercions, JSON, iteration, dumps, and jobs. A getter or proxy trap that spins is interrupted just like a top-level loop, and once the deadline has passed every further step re-interrupts, so neither an `async` body that turns the interrupt into a rejection nor a host function that rethrows it can keep the guest running. `evalCode` and `executePendingJob` accept a per-call `timeoutMs`.
 
-`stackBytes` bounds the native stack the guest may use, so the recursion depth it allows depends on how the engine was compiled: about 1,150 nested calls per MiB with an optimized build and about 130 with TinyCC, whose unoptimized interpreter frames are far larger. Size it for the build you ship and for the deepest recursion you expect.
+`stackBytes` bounds the native stack the guest may use, so the recursion depth it allows depends on how the engine was compiled: about 1,150 nested calls per MiB with an optimized build and about 130 with TinyCC, whose unoptimized interpreter frames are far larger. Size it for the build you ship and for the deepest recursion you expect, and keep it well below the stack of the thread that runs the guest (8 MiB on Bun's main thread, a few MiB in a `Worker`); `setMaxStackSize` refuses `0`, which QuickJS would read as unlimited.
 
 ### Converting values
 
@@ -118,14 +118,14 @@ The finalizer runs with the opaque pointer when QuickJS frees the object. `setCl
 
 - `for (const item of handle)` iterates any guest iterable; each yielded `JSValue` is owned.
 - `getProp`, `setProp`, `defineProp`, `hasProp`, `deleteProp`, `getOwnPropertyDescriptor`, and `defineProperty` take string, numeric, or `JSAtom` keys. `keys` returns the enumerable string keys; `ownAtoms` also returns symbols.
-- `newArrayBuffer(view)` shares host memory with the guest without copying; the view is pinned until QuickJS frees the buffer, and its `ArrayBuffer` must not be resized or transferred meanwhile. `newArrayBufferCopy`, `newTypedArray`, `typedArrayInfo`, and `arrayBufferBytes` cover the copying variants.
+- `newArrayBuffer(view)` shares host memory with the guest without copying; the view is pinned until QuickJS frees the buffer, resizable buffers are refused, and the `ArrayBuffer` must not be transferred meanwhile. `newArrayBufferCopy`, `newTypedArray`, `typedArrayInfo`, and `arrayBufferBytes` cover the copying variants.
 - `newSymbol`, `newDate`, `newBigInt` (any size), `newAtom`, `JSAtom.toValue()`.
 - `runtime.setPromiseRejectionTracker`, `runtime.memoryUsage()`, `runtime.dumpMemoryUsage()`, `runtime.runGC()`, `setStripInfo`, `setCanBlock`, `setRuntimeInfo`.
 - `vm.addIntrinsics([...])` on a context created with `intrinsics: "minimal"` picks which built-ins exist.
 
 ### Escape hatches
 
-`library.native` exposes every bound C function with its exact signature, and `runtime.ptr`, `vm.ptr`, and `value.ptr` give the underlying pointers. `JSValue`s are 16-byte cells (`value.cell`), so C functions that take or return `JSValue` by value are wrapped as `qjs_bun_*` functions that read and write cells by pointer. Raw text parsers (`qjs_bun_eval`, `qjs_bun_parse_json`, `qjs_bun_compile_module`) require the byte after the given length to be `0`, as QuickJS does.
+`library.native` exposes every bound C function with its exact signature, and `runtime.ptr`, `vm.ptr`, and `value.ptr` give the underlying pointers. `JSValue`s are 16-byte cells (`value.cell`), so C functions that take or return `JSValue` by value are wrapped as `qjs_bun_*` functions that read and write cells by pointer. Raw text parsers (`qjs_bun_eval`, `qjs_bun_parse_json`, `qjs_bun_compile_module`) require the byte after the given length to be `0`, as QuickJS does. `readObject` with `QuickJSReadObjectFlags.BYTECODE` runs whatever the bytes describe, so never hand it untrusted data.
 
 ## Performance
 
@@ -153,7 +153,7 @@ Per-operation costs with the optimized build: creating a runtime with a context 
 
 ## Vendored QuickJS
 
-`quickjs/` holds the engine sources from [bellard/quickjs](https://github.com/bellard/quickjs) at commit `9d01a96` (release `2026-06-04` plus upstream fixes). The `quickjs-libc` runtime and the experimental `intl/` and `temporal/` sources (`CONFIG_TEMPORAL_INTL`, about 70,000 lines that landed on 2026-10-10) are left out, so the engine behaves as if that option were off. Four local changes are applied on top; search `quickjs/quickjs.c` for `JS_DupValue(ctx, error_obj)` (`build_backtrace` keeps the error alive while it runs, fixing a use-after-free under memory pressure), `!defined(__TINYC__)` (Atomics are skipped under TinyCC, which has no `stdatomic.h`; optimized builds compile them and the bindings delete the global), `malloc_limit = (size_t)-1` (`JS_ThrowOutOfMemory` can always allocate its error), and `JSDefMallocHeader` (the default allocator records block sizes itself instead of calling `malloc_usable_size`, which crashes under TinyCC on Linux because Bun's bundled allocator and libc disagree, and makes memory accounting identical on every platform). To upgrade, copy the files listed under `files` in `package.json` from the new upstream commit, reapply those changes, update `quickjs/VERSION` if upstream did, and run `bun test` plus `bun run build && QUICKJS_BUN_NATIVE_LIBRARY=$PWD/build/quickjs-bun.* bun test`.
+`quickjs/` holds the engine sources from [bellard/quickjs](https://github.com/bellard/quickjs) at commit `9d01a96` (release `2026-06-04` plus upstream fixes). The `quickjs-libc` runtime and the experimental `intl/` and `temporal/` sources (`CONFIG_TEMPORAL_INTL`, about 70,000 lines that landed on 2026-10-10) are left out, so the engine behaves as if that option were off. Six local changes are applied on top; search `quickjs/quickjs.c` for `JS_DupValue(ctx, error_obj)` (`build_backtrace` keeps the error alive while it runs, fixing a use-after-free under memory pressure), `!defined(__TINYC__)` (Atomics are skipped under TinyCC, which has no `stdatomic.h`; optimized builds compile them and the bindings delete the global), `malloc_limit = (size_t)-1` (`JS_ThrowOutOfMemory` can always allocate its error), `JSDefMallocHeader` (the default allocator records block sizes itself instead of calling `malloc_usable_size`, which crashes under TinyCC on Linux because Bun's bundled allocator and libc disagree, and makes memory accounting identical on every platform), `remove_gc_object(&ctx->header)` (a context whose creation fails under the memory limit no longer leaves a freed node in the GC list), and the `js_poll_interrupts` calls added to `JS_GetPropertyUint32`, `JS_TryGetPropertyInt64`, `JS_GetPropertyInt64`, `string_indexof`, `js_string_indexOf`, `js_string_includes`, `js_bigint_to_string1`, and the proxy `ownKeys` duplicate check (builtin loops that never reached the interpreter's interrupt polls, so sparse arrays, string searches, huge bigints, and proxies could run past the deadline). To upgrade, copy the files listed under `files` in `package.json` from the new upstream commit, reapply those changes, update `quickjs/VERSION` if upstream did, and run `bun test` plus `bun run build && QUICKJS_BUN_NATIVE_LIBRARY=$PWD/build/quickjs-bun.* bun test`.
 
 ## Gotchas
 
@@ -162,7 +162,7 @@ Per-operation costs with the optimized build: creating a runtime with a context 
 - A `JSException` owns its guest value; dispose it when you are done, or read `.name`, `.message`, and `.stack`, which are copied eagerly.
 - Every module evaluated with `TYPE_MODULE` stays registered in its context until the context is disposed, so evaluate untrusted snippets as scripts (`TYPE_GLOBAL`, with `ASYNC` for top-level `await`) when a context is reused.
 - `TimeoutError` is raised when the deadline of the call you made expires. Code interrupted inside an async function surfaces as a rejected promise whose reason is `InternalError: interrupted`.
-- Close the `QuickJS` library only after every runtime is disposed.
+- Close the `QuickJS` library only after every runtime is disposed; `close()` refuses while one is alive.
 - Disposing a context releases its heap at the next `runtime.runGC()` or when the runtime is disposed, because the global object sits in a reference cycle. A runtime that outlives many contexts should run the GC after disposing each one.
 - Lone surrogates survive both directions (`newString`, `newValue`, `toString`, `keys`, atoms); source text, JSON text, and C strings handed to QuickJS by name (filenames, module and symbol names) must be well-formed.
 

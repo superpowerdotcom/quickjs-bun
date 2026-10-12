@@ -355,7 +355,6 @@ test("exposes runtime limits and memory controls", () => {
   runtime.setRuntimeInfo("quickjs-bun test runtime");
   runtime.setGCThreshold(0);
   runtime.setCanBlock(false);
-  runtime.setMaxStackSize(0);
   runtime.setMaxStackSize(64 * 1024);
   runtime.setStripInfo(QuickJSStripFlags.DEBUG);
   expect(runtime.getStripInfo()).toBe(QuickJSStripFlags.DEBUG);
@@ -1721,6 +1720,66 @@ test("keeps the deadline intact when a module loader fails with a NUL in its mes
   Bun.sleepSync(60);
   using after = context.evalCode("1 + 1");
   expect(after.toNumber()).toBe(2);
+});
+
+test("interrupts engine builtins that loop without running bytecode", () => {
+  using context = vm({ timeoutMs: 50 });
+  for (const code of [
+    "const a = []; a.length = 2 ** 32 - 1; a.indexOf(1)",
+    "'a'.repeat(2 ** 20).indexOf('a'.repeat(2 ** 19) + 'b')",
+    "'a'.repeat(2 ** 20).includes('a'.repeat(2 ** 19) + 'b')",
+    "'a'.repeat(2 ** 20).replaceAll('a'.repeat(2 ** 19) + 'b', '')",
+    "'a'.repeat(2 ** 20).split('a'.repeat(2 ** 19) + 'b')",
+    "(2n ** 1000000n).toString()",
+    "Reflect.ownKeys(new Proxy({}, { ownKeys: () => Array.from({ length: 100000 }, (_, i) => `k${i}`) }))",
+  ]) {
+    const started = performance.now();
+    expect(() => context.evalCode(code)).toThrow("QuickJS execution timed out");
+    expect(performance.now() - started).toBeLessThan(5000);
+  }
+});
+
+test("shares one host value per guest string, bigint, or error in dump", () => {
+  using context = vm();
+  using value = context.evalCode(
+    "const e = new Error('x'); const s = 'y'.repeat(10); ({ a: e, b: e, c: s, d: s, n: 2n ** 70n })",
+  );
+  const result = context.dump(value) as { a: Error; b: Error; c: string; d: string; n: bigint };
+  expect(result.a).toBe(result.b);
+  expect(result.c).toBe(result.d);
+  expect(result.n).toBe(2n ** 70n);
+});
+
+test("survives context creation failing under the memory limit", () => {
+  for (const bytes of [38 * 1024, 39 * 1024, 40 * 1024]) {
+    const runtime = new JSRuntime({ library, memoryBytes: bytes });
+    try {
+      runtime.createContext().dispose();
+    } catch (error) {
+      expect(error).toBeInstanceOf(Error);
+    }
+    runtime.dispose();
+  }
+});
+
+test("rejects misuse that would corrupt the engine", () => {
+  using context = vm();
+  using empty = context.newTypedArray(QuickJSTypedArray.UINT8);
+  expect(empty.length).toBe(0);
+  using array = context.newArray();
+  expect(() => array.setOpaque(null)).toThrow("setOpaque needs an object of a registered class");
+  expect(() => context.runtime.setMaxStackSize(0)).toThrow(
+    "stackBytes must be a positive safe integer",
+  );
+  const resizable = new ArrayBuffer(8, { maxByteLength: 16 });
+  expect(() => context.newArrayBuffer(resizable)).toThrow(
+    "newArrayBuffer needs a fixed-length buffer",
+  );
+  const other = new QuickJS();
+  const runtime = new JSRuntime({ library: other });
+  expect(() => other.close()).toThrow("QuickJS library is still used by a runtime");
+  runtime.dispose();
+  other.close();
 });
 
 test("refuses module exports before a C module is instantiated", () => {

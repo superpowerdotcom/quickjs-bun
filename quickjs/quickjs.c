@@ -2625,6 +2625,7 @@ JSContext *JS_NewContextRaw(JSRuntime *rt)
     ctx->class_proto = js_malloc_rt(rt, sizeof(ctx->class_proto[0]) *
                                     rt->class_count);
     if (!ctx->class_proto) {
+        remove_gc_object(&ctx->header);
         js_free_rt(rt, ctx);
         return NULL;
     }
@@ -9193,6 +9194,8 @@ static JSValue JS_GetPropertyValue(JSContext *ctx, JSValueConst this_obj,
 JSValue JS_GetPropertyUint32(JSContext *ctx, JSValueConst this_obj,
                              uint32_t idx)
 {
+    if (unlikely(js_poll_interrupts(ctx)))
+        return JS_EXCEPTION;
     return JS_GetPropertyValue(ctx, this_obj, JS_NewUint32(ctx, idx));
 }
 
@@ -9207,6 +9210,10 @@ static int JS_TryGetPropertyInt64(JSContext *ctx, JSValueConst obj, int64_t idx,
     JSAtom prop;
     int present;
 
+    if (unlikely(js_poll_interrupts(ctx))) {
+        *pval = JS_EXCEPTION;
+        return -1;
+    }
     if (likely((uint64_t)idx <= JS_ATOM_MAX_INT)) {
         /* fast path */
         present = JS_HasProperty(ctx, obj, __JS_AtomFromUInt32(idx));
@@ -9237,6 +9244,8 @@ static JSValue JS_GetPropertyInt64(JSContext *ctx, JSValueConst obj, int64_t idx
     JSAtom prop;
     JSValue val;
 
+    if (unlikely(js_poll_interrupts(ctx)))
+        return JS_EXCEPTION;
     if ((uint64_t)idx <= INT32_MAX) {
         /* fast path for fast arrays */
         return JS_GetPropertyValue(ctx, obj, JS_NewInt32(ctx, idx));
@@ -12779,6 +12788,12 @@ static JSValue js_bigint_to_string1(JSContext *ctx, JSValueConst val, int radix)
             radix_base = radix_base_table[radix - 2];
             len = r->len;
             for(;;) {
+                ctx->interrupt_counter -= len >> 4;
+                if (unlikely(js_poll_interrupts(ctx))) {
+                    js_free(ctx, tmp);
+                    js_free(ctx, buf);
+                    return JS_EXCEPTION;
+                }
                 /* remove leading zero limbs */
                 while (len > 1 && r->tab[len - 1] == 0)
                     len--;
@@ -45864,13 +45879,16 @@ static int string_indexof_char(JSString *p, int c, int from)
     return -1;
 }
 
-static int string_indexof(JSString *p1, JSString *p2, int from)
+static int string_indexof(JSContext *ctx, JSString *p1, JSString *p2, int from)
 {
     /* assuming 0 <= from <= p1->len */
     int c, i, j, len1 = p1->len, len2 = p2->len;
     if (len2 == 0)
         return from;
     for (i = from, c = string_get(p2, 0); i + len2 <= len1; i = j + 1) {
+        ctx->interrupt_counter -= len2 >> 8;
+        if (unlikely(js_poll_interrupts(ctx)))
+            return -2;
         j = string_indexof_char(p1, c, i);
         if (j < 0 || j + len2 > len1)
             break;
@@ -46013,6 +46031,9 @@ static JSValue js_string_indexOf(JSContext *ctx, JSValueConst this_val,
     ret = -1;
     if (len >= v_len && inc * (stop - start) >= 0) {
         for (i = start;; i += inc) {
+            ctx->interrupt_counter -= v_len >> 8;
+            if (unlikely(js_poll_interrupts(ctx)))
+                goto fail;
             if (!string_cmp(p, p1, i, 0, v_len)) {
                 ret = i;
                 break;
@@ -46079,6 +46100,9 @@ static JSValue js_string_includes(JSContext *ctx, JSValueConst this_val,
     }
     if (start >= 0 && start <= stop) {
         for (i = start;; i++) {
+            ctx->interrupt_counter -= v_len >> 8;
+            if (unlikely(js_poll_interrupts(ctx)))
+                goto fail;
             if (!string_cmp(p, p1, i, 0, v_len)) {
                 ret = 1;
                 break;
@@ -46362,7 +46386,9 @@ static JSValue js_string_replace(JSContext *ctx, JSValueConst this_val,
             else
                 pos = endOfLastMatch + 1;
         } else {
-            pos = string_indexof(sp, searchp, endOfLastMatch);
+            pos = string_indexof(ctx, sp, searchp, endOfLastMatch);
+            if (pos == -2)
+                goto exception;
         }
         if (pos < 0) {
             if (is_first) {
@@ -46472,7 +46498,9 @@ static JSValue js_string_split(JSContext *ctx, JSValueConst this_val,
         goto done;
     }
     for (q = p; (q += !r) <= s - r - !r; q = p = e + r) {
-        e = string_indexof(sp, rp, q);
+        e = string_indexof(ctx, sp, rp, q);
+        if (e == -2)
+            goto exception;
         if (e < 0)
             break;
         T = js_sub_string(ctx, sp, p, e);
@@ -51735,6 +51763,9 @@ static int js_proxy_get_own_property_names(JSContext *ctx,
     /* check duplicate properties (XXX: inefficient, could store the
      * properties an a temporary object to use the hash) */
     for(i = 1; i < len; i++) {
+        ctx->interrupt_counter -= i >> 8;
+        if (unlikely(js_poll_interrupts(ctx)))
+            goto fail;
         if (find_prop_key(tab, i, tab[i].atom) >= 0) {
             JS_ThrowTypeError(ctx, "proxy: duplicate property");
             goto fail;

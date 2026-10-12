@@ -63,6 +63,7 @@ export class JSRuntime {
     const runtime = this.native.qjs_bun_new_runtime();
     assert(typeof runtime === "number", "QuickJS runtime did not initialize");
     this.#runtime = runtime;
+    this.library.runtimes++;
     this.#hostCallback = new JSCallback((request: Pointer) => this.#callHost(request), {
       args: ["ptr"],
       returns: "void",
@@ -214,10 +215,7 @@ export class JSRuntime {
   }
 
   setMaxStackSize(bytes: number): void {
-    assert(
-      Number.isSafeInteger(bytes) && bytes >= 0,
-      "stackBytes must be a non-negative safe integer",
-    );
+    assert(Number.isSafeInteger(bytes) && bytes > 0, "stackBytes must be a positive safe integer");
     this.native.JS_SetMaxStackSize(this.ptr, bytes);
   }
 
@@ -315,6 +313,7 @@ export class JSRuntime {
     if (this.#disposed) return;
     assert(this.hostDepth === 0, "QuickJS runtime cannot be disposed inside a host call");
     this.#disposed = true;
+    this.library.runtimes--;
     for (const context of this.contexts.values()) context.dispose();
     this.native.qjs_bun_free_runtime(this.#runtime);
     for (const callback of this.callbacks) callback.close();
