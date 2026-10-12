@@ -22,6 +22,22 @@ import type {
   JSValueType,
 } from "./types";
 
+function utf8(buffer: Buffer, start: number, end: number): string {
+  const text = buffer.toString("utf8", start, end);
+  if (!text.includes("\uFFFD")) return text;
+  let decoded = "";
+  for (let index = start; index < end; ) {
+    const byte = buffer[index]!;
+    const width = byte >= 0xf0 ? 4 : byte >= 0xe0 ? 3 : byte >= 0xc0 ? 2 : 1;
+    let code = width === 1 ? byte : byte & (0x7f >> width);
+    for (let offset = 1; offset < width; offset++)
+      code = (code << 6) | (buffer[index + offset]! & 0x3f);
+    decoded += String.fromCodePoint(code);
+    index += width;
+  }
+  return decoded;
+}
+
 const types: readonly JSValueType[] = [
   "undefined",
   "null",
@@ -592,8 +608,10 @@ export class JSValue {
   arrayBufferBytes(): Uint8Array {
     const size = new BigUint64Array(1);
     const data = this.vm.native.qjs_bun_get_array_buffer(this.vm.ctx, size, this.ptr);
-    if (typeof data !== "number") throw this.vm.getException();
-    return new Uint8Array(toArrayBuffer(data, 0, Number(size[0]!))).slice();
+    if (typeof data !== "number" && this.vm.hasException()) throw this.vm.getException();
+    const length = Number(size[0]!);
+    if (typeof data !== "number" || length === 0) return new Uint8Array(0);
+    return new Uint8Array(toArrayBuffer(data, 0, length)).slice();
   }
 
   detachArrayBuffer(): void {
@@ -645,18 +663,19 @@ export class JSValue {
     let count = Number(
       vm.native.qjs_bun_own_keys(vm.ctx, this.ptr, flags, scratch, scratch.byteLength),
     );
-    if (count < -1) {
+    for (let attempt = 0; count < -1 && attempt < 4; attempt++) {
       scratch = vm.scratch = Buffer.allocUnsafe(-count * 2);
       count = Number(
         vm.native.qjs_bun_own_keys(vm.ctx, this.ptr, flags, scratch, scratch.byteLength),
       );
     }
-    if (count < 0) throw vm.getException();
+    if (count === -1) throw vm.getException();
+    if (count < -1) throw new RangeError("QuickJS property names keep growing between reads");
     const keys: string[] = [];
     let offset = 0;
     for (let index = 0; index < count; index++) {
       const length = scratch.readUInt32LE(offset);
-      keys.push(scratch.toString("utf8", offset + 4, offset + 4 + length));
+      keys.push(utf8(scratch, offset + 4, offset + 4 + length));
       offset += 4 + length;
     }
     return keys;
@@ -698,7 +717,11 @@ export class JSValue {
       for (;;) {
         const cell = new Uint8Array(16);
         vm.native.qjs_bun_iterator_next(vm.ctx, cell, iterator.ptr, next.ptr, done);
-        const value = vm.resultValue(cell);
+        const value = new JSValue(vm, cell, true);
+        if (value.tag === QuickJSValueTag.EXCEPTION) {
+          finished = true;
+          throw vm.getException();
+        }
         if (done[0] !== 0) {
           finished = true;
           value.dispose();
@@ -824,7 +847,7 @@ export class JSValue {
       );
     }
     if (length < 0) throw vm.getException();
-    return scratch.toString("utf8", 0, length);
+    return utf8(scratch, 0, length);
   }
 
   #primitive(): string | undefined {
@@ -886,7 +909,8 @@ export class JSAtom {
     const text = this.vm.native.JS_AtomToCStringLen(this.vm.ctx, size, this.value);
     assert(typeof text === "number", "QuickJS atom string is null");
     try {
-      return new CString(text, 0, Number(size[0]!)) as string;
+      const length = Number(size[0]!);
+      return length === 0 ? "" : utf8(Buffer.from(toArrayBuffer(text, 0, length)), 0, length);
     } finally {
       this.vm.native.JS_FreeCString(this.vm.ctx, text);
     }

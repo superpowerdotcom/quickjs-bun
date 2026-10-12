@@ -411,6 +411,7 @@ export class QuickJS {
         ] as unknown as string,
         include: [source("./native/"), source("../quickjs/")],
         library: ["m"],
+        flags: ["-w"],
         define: { CONFIG_VERSION: `"${QUICKJS_VERSION_TEXT}"`, NDEBUG: "1", _GNU_SOURCE: "1" },
         symbols: { qjs_bun_symbol: { args: ["buffer"], returns: "ptr" } },
       });

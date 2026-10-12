@@ -1511,3 +1511,100 @@ test("rejects NUL characters in names and filenames", () => {
   expect(() => instance.evalCode("1", { filename: "a\0b" })).toThrow("NUL");
   expect(() => instance.newAtomString("a\0b")).toThrow("NUL");
 });
+
+test("survives detach and transfer of zero-copy array buffers", () => {
+  const instance = vm();
+  const runtime = instance.runtime;
+  for (const script of [
+    "shared.transfer()",
+    "shared.transfer(8)",
+    "shared.transfer(2)",
+    "detach",
+  ]) {
+    using buffer = instance.newArrayBuffer(new Uint8Array([1, 2, 3, 4]));
+    instance.setGlobal("shared", buffer);
+    if (script === "detach") buffer.detachArrayBuffer();
+    else instance.evalCode(`globalThis.moved = ${script}`).dispose();
+    runtime.runGC();
+    using probe = instance.newFunction(() => 7);
+    instance.setGlobal("probe", probe);
+    using answer = instance.evalCode("probe()");
+    expect(answer.toNumber()).toBe(7);
+  }
+  instance.evalCode("globalThis.moved = undefined; globalThis.shared = undefined").dispose();
+  runtime.runGC();
+  using empty = instance.newArrayBuffer(new Uint8Array(0));
+  expect(empty.arrayBufferBytes().length).toBe(0);
+});
+
+test("enforces execution timeouts on atoms, data properties, and constructors", () => {
+  const instance = vm({ timeoutMs: 25 });
+  using spinning = instance.evalCode(
+    "new Proxy(function () {}, { getOwnPropertyDescriptor() { while (true) {} }, defineProperty() { while (true) {} } })",
+  );
+  using key = instance.evalCode("({ toString() { while (true) {} } })");
+  using proto = instance.newObject();
+  expect(() => key.toAtom()).toThrow("timed out");
+  expect(() => spinning.getDataProp("x")).toThrow("timed out");
+  expect(() => spinning.setConstructor(proto)).toThrow("timed out");
+});
+
+test("bounds retries when own keys keep growing", () => {
+  const instance = vm({ timeoutMs: 5000 });
+  using growing = instance.evalCode(
+    "let n = 25; new Proxy({}, { ownKeys() { n *= 4; return Array.from({ length: 100 }, (_, i) => 'k'.repeat(n) + i) }, getOwnPropertyDescriptor() { return { value: 1, enumerable: true, configurable: true } } })",
+  );
+  expect(() => growing.keys()).toThrow("keep growing");
+  using stable = instance.evalCode("({ a: 1, ['x'.repeat(5000)]: 2 })");
+  expect(stable.keys().length).toBe(2);
+});
+
+test("preserves lone surrogates in both directions", () => {
+  const instance = vm();
+  const text = "a\ud800b\udfffc";
+  using direct = instance.newString(text);
+  expect(direct.toString()).toBe(text);
+  using nested = instance.newValue({ text, list: [text] });
+  expect(instance.dump(nested)).toEqual({ text, list: [text] });
+  using guest = instance.evalCode("'x\\ud800y' + '\u{1F600}'");
+  expect(guest.toString()).toBe("x\ud800y\u{1F600}");
+  using keyed = instance.evalCode("({ ['k\\ud800']: 1 })");
+  expect(keyed.keys()).toEqual(["k\ud800"]);
+  using atom = instance.newAtom("k\ud800");
+  expect(atom.toString()).toBe("k\ud800");
+});
+
+test("does not close an iterator whose next() threw", () => {
+  const instance = vm();
+  using iterable = instance.evalCode(`
+    globalThis.returned = false;
+    ({ [Symbol.iterator]() { return { next() { throw new Error('next failed') }, return() { globalThis.returned = true; return {} } } } })
+  `);
+  expect(() => {
+    for (const item of iterable) item.dispose();
+  }).toThrow("next failed");
+  using returned = instance.getGlobal("returned");
+  expect(returned.toBoolean()).toBe(false);
+});
+
+test("reports an error when a host function disposes its own context", () => {
+  using runtime = new JSRuntime({ library });
+  const context = runtime.createContext();
+  using suicide = context.newFunction(() => {
+    context.dispose();
+    return "gone";
+  });
+  context.setGlobal("suicide", suicide);
+  expect(() => context.evalCode("suicide()")).toThrow();
+  expect(context.disposed).toBe(true);
+});
+
+test("registers classes with explicit ids", () => {
+  using runtime = new JSRuntime({ library });
+  const classId = runtime.newClassId();
+  expect(runtime.registerClass("Explicit", { classId })).toBe(classId);
+  expect(runtime.isRegisteredClass(classId)).toBe(true);
+  using context = runtime.createContext();
+  using object = context.newObjectClass(classId);
+  expect(object.classId).toBe(classId);
+});
