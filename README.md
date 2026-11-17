@@ -46,7 +46,7 @@ vm.evalCode("const a = []; while (true) a.push('x'.repeat(1e4))"); // throws Int
 vm.evalCode("(function f() { return f() + 1 })()"); // throws InternalError: stack overflow
 ```
 
-`timeoutMs` applies to every operation that can run guest code: evaluation, calls, property access, coercions, JSON, iteration, dumps, and jobs. A getter or proxy trap that spins is interrupted just like a top-level loop, and once the deadline has passed every further step re-interrupts, so neither an `async` body that turns the interrupt into a rejection nor a host function that rethrows it can keep the guest running. `evalCode` and `executePendingJob` accept a per-call `timeoutMs`.
+`timeoutMs` applies to every operation that can run guest code: evaluation, calls, property access, coercions, JSON, iteration, dumps, and jobs. A getter or proxy trap that spins is interrupted just like a top-level loop, and once the deadline has passed every further step re-interrupts, so neither an `async` body that turns the interrupt into a rejection nor a host function that rethrows it can keep the guest running. `evalCode` and `executePendingJob` accept a per-call `timeoutMs`. On POSIX systems `timeoutMs` counts the CPU time of the calling thread, so time in which the thread is stopped, waits for a core, or blocks inside a host function does not count. On Windows it counts wall time.
 
 `stackBytes` bounds the native stack the guest may use, so the recursion depth it allows depends on how the engine was compiled: about 1,150 nested calls per MiB with an optimized build and about 130 with TinyCC, whose unoptimized interpreter frames are far larger. Size it for the build you ship and for the deepest recursion you expect, and keep it well below the stack of the thread that runs the guest (8 MiB on Bun's main thread, a few MiB in a `Worker`); `setMaxStackSize` refuses `0`, which QuickJS would read as unlimited.
 
@@ -138,7 +138,7 @@ QUICKJS_BUN_NATIVE_LIBRARY=$PWD/build/quickjs-bun.dylib bun start
 
 The equivalent command line is in `package.json`; any C11 compiler works (`cc`, `clang`, `gcc`, `zig cc`), including cross compilation for Linux glibc, musl, and Windows. `new QuickJS({ path })` loads a specific file.
 
-Guest code runs on the calling thread, so every call blocks the event loop for as long as it runs, up to its `timeoutMs`. A server that must keep serving while sandboxes run should give each runtime its own `Worker`.
+Guest code runs on the calling thread, so every call blocks the event loop for as long as it runs: up to its `timeoutMs` of CPU time, and longer in wall time while the thread waits for a core. A server that must keep serving while sandboxes run should give each runtime its own `Worker`.
 
 `bun scripts/stress.ts` on a 10-core Apple Silicon machine with Bun 1.4.3 (the machine was not idle, so treat these as a floor):
 

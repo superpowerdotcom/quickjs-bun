@@ -1718,7 +1718,9 @@ test("keeps the deadline intact when a module loader fails with a NUL in its mes
     failed = true;
   }
   expect(failed).toBe(true);
-  Bun.sleepSync(60);
+  const before = process.threadCpuUsage();
+  let used = process.threadCpuUsage(before);
+  while (used.user + used.system < 60_000) used = process.threadCpuUsage(before);
   using after = context.evalCode("1 + 1");
   expect(after.toNumber()).toBe(2);
 });
