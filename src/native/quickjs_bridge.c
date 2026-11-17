@@ -13,7 +13,7 @@ static double qjs_bun_now_ms(void) {
 #else
 static double qjs_bun_now_ms(void) {
   struct timespec ts;
-  clock_gettime(CLOCK_MONOTONIC, &ts);
+  clock_gettime(CLOCK_THREAD_CPUTIME_ID, &ts);
   return (double)ts.tv_sec * 1000.0 + (double)ts.tv_nsec / 1000000.0;
 }
 #endif
